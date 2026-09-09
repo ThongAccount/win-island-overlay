@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Crash dumps
+*.stackdump
+
+# AI chat / dev artifacts
+dynamic-island-chat.jsonl
+*.log
+
+# Node / frontend
+node_modules/
+dist/
+
+# IDE / editor
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,18 @@
+/* Glassmorphism style */
+.overlay {
+    background: rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(30px);
+    border-radius: 999px;
+    box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+    transition: all 0.3s ease;
+}
+
+/* Animation for expansion */
+@keyframes expand {
+    from { transform: scale(1); }
+    to { transform: scale(1.2); }
+}
+
+.expanded {
+    animation: expand 0.3s ease forwards;
+}
