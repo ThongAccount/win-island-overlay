@@ -1,6 +1,8 @@
 import sys
 import signal
-from PySide6.QtCore import QTimer
+import os
+from pathlib import Path
+from PySide6.QtCore import QTimer, QFileSystemWatcher
 from PySide6.QtWidgets import QApplication
 from overlay import OverlayWindow
 
@@ -16,6 +18,21 @@ def main():
 
     overlay = OverlayWindow()
     overlay.show()
+
+    # Auto-reload on .py file changes
+    watcher = QFileSystemWatcher()
+    backend_dir = Path(__file__).parent
+    for py_file in backend_dir.rglob("*.py"):
+        watcher.addPath(str(py_file))
+
+    def on_changed(path):
+        print(f"[reload] {path} changed, restarting...")
+        app.quit()
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    watcher.fileChanged.connect(on_changed)
+    overlay._watcher = watcher
+
     sys.exit(app.exec())
 
 
