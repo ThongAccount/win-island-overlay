@@ -1,6 +1,4 @@
-from typing import Dict, Any, Optional
-from PySide6.QtCore import Qt, QTimer, QRect, QRectF, QEasingCurve, QPropertyAnimation
-from PySide6.QtCore import QEvent, QVariantAnimation, QCoreApplication, QPoint
+from PySide6.QtCore import Qt, QTimer, QRect, QRectF, QEasingCurve, QPropertyAnimation, QVariantAnimation
 from PySide6.QtWidgets import QWidget, QApplication
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QFont, QCursor, QPen, QBrush, QRadialGradient
 from PySide6.QtGui import QPixmap, QFontMetrics
@@ -349,7 +347,7 @@ class OverlayWindow(QWidget):
         self._anim_ease = lambda p: p
         self._anim_ease_wh = None
 
-        self._obs_alpha_anim = QPropertyAnimation(self, b"_obs_alpha_prop")
+        self._obs_alpha_anim = QVariantAnimation(self)
         self._obs_alpha_anim.valueChanged.connect(self._on_obs_alpha_step)
         self._obs_alpha_anim.finished.connect(self._on_obs_alpha_finished)
 
@@ -358,37 +356,36 @@ class OverlayWindow(QWidget):
         self._obs_fade_timer.timeout.connect(self._start_obs_fade_in)
 
         self._notif_timer = QTimer(self)
-        self._notif_timer.setSingleShift(True if False else True)
+        self._notif_timer.setSingleShot(True)
         self._notif_timer.timeout.connect(self._dismiss_notification)
 
-        self._notif_progress_anim = QPropertyAnimation(self, b"_notif_icon_progress")
+        self._notif_progress_anim = QVariantAnimation(self)
         self._notif_progress_anim.valueChanged.connect(self._on_notif_progress_step)
         self._notif_progress_anim.finished.connect(self._on_notif_progress_finished)
 
-        self._notif_text_anim = QPropertyAnimation(self, b"_notif_text_alpha")
+        self._notif_text_anim = QVariantAnimation(self)
         self._notif_text_anim.valueChanged.connect(self._on_notif_text_step)
 
         self._notif_text_timer = QTimer(self)
         self._notif_text_timer.setSingleShot(True)
         self._notif_text_timer.timeout.connect(self._start_notif_text_fade_in)
 
-        self._media_text_anim = QPropertyAnimation(self, b"_media_text_alpha")
+        self._media_text_anim = QVariantAnimation(self)
         self._media_text_anim.valueChanged.connect(self._on_media_text_step)
 
-        self._media_alpha_anim = QPropertyAnimation(self, b"_media_alpha")
+        self._media_alpha_anim = QVariantAnimation(self)
         self._media_alpha_anim.valueChanged.connect(self._on_media_alpha_step)
         self._media_alpha_anim.finished.connect(self._on_media_alpha_finished)
 
-        self._title_scroll_anim = QPropertyAnimation(self, b"_title_scroll")
+        self._title_scroll_anim = QVariantAnimation(self)
         self._title_scroll_anim.valueChanged.connect(self._on_title_scroll_step)
         self._title_scroll_anim.finished.connect(self._on_title_scroll_finished)
 
-        self._split_anim = QPropertyAnimation(self, b"_split_progress")
+        self._split_anim = QVariantAnimation(self)
         self._split_anim.valueChanged.connect(self._on_split_step)
 
-        self._toast_alpha_anim = QPropertyAnimation(self, b"_toast_alpha")
+        self._toast_alpha_anim = QVariantAnimation(self)
         self._toast_alpha_anim.valueChanged.connect(lambda v: setattr(self, '_toast_alpha', v) or self.update())
-
         self._toast_timer = QTimer(self)
         self._toast_timer.setSingleShot(True)
         self._toast_timer.timeout.connect(self._dismiss_toast)
@@ -1155,43 +1152,7 @@ class OverlayWindow(QWidget):
             'viz_cy': viz_cy,
             'progress_rect': progress_rect,
             'progress_hit_rect': progress_rect.adjusted(0, -10, 0, 8),
-            'obs_dot_x': obs_dot_x,
-            'obs_dot_y': obs_dot_y,
         }
-
-    # --- OBS state management (called by OBS plugin) ---
-    def _obs_alpha_prop(self, value):
-        """Property setter for QPropertyAnimation."""
-        self._obs_alpha = value
-        self.update()
-
-    def _notif_icon_progress(self, value):
-        self._notif_icon_progress = value
-        self.update()
-
-    def _notif_text_alpha(self, value):
-        self._notif_text_alpha = value
-        self.update()
-
-    def _media_text_alpha(self, value):
-        self._media_text_alpha = value
-        self.update()
-
-    def _media_alpha(self, value):
-        self._media_alpha = value
-        self.update()
-
-    def _title_scroll(self, value):
-        self._title_scroll = value
-        self.update()
-
-    def _split_progress(self, value):
-        self._split_progress = value
-        self.update()
-
-    def _toast_alpha(self, value):
-        self._toast_alpha = value
-        self.update()
 
     # --- Media handlers ---
     def _on_media_result(self, result):
