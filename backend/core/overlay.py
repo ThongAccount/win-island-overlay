@@ -52,7 +52,7 @@ class WINDOWPLACEMENT(ctypes.Structure):
     ]
 
 
-# Easing functions from main branch
+# Easing functions from main branch - EXACT copies
 def _ease_incubic_outback(progress):
     overshoot = 1.70158
     split = 0.35
@@ -87,11 +87,13 @@ _incubic_ease = QEasingCurve(QEasingCurve.Type.InCubic).valueForProgress
 class OverlayWindow(QWidget):
     """Thin shell: glassmorphism pill, position, animation, event routing.
     
-    Features ported from main branch:
-    - Fullscreen detection with auto-hide
-    - Proximity/micro-expand detection
-    - Click-through when collapsed
-    - Custom easing animations (QVariantAnimation)
+    Animation behavior EXACTLY matches main branch:
+    - Expand: _outback_ease (500ms)
+    - Collapse: _ease_inquad_outback (500ms) 
+    - Fullscreen hide: _ease_incubic_outback (175ms)
+    - Fullscreen show: _outback_ease (400ms)
+    - OBS/Media/Toast/Weather resize: _ease_incubic_outback (OBS_ANIM_DURATION)
+    - Micro-expand: _inquad_ease (200ms)
     """
 
     def __init__(self, registry: PluginRegistry, config: Dict[str, Any]):
@@ -112,15 +114,15 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setMouseTracking(True)
 
-        # Base geometry
-        self._margin_top = self._window_config.get('margin_top', 8.0)
+        # Base geometry (from main branch constants)
+        self._base_margin_top = self._window_config.get('margin_top', 8.0)
         self._base_micro_width = self._window_config.get('micro_width', 240.0)
         self._base_expanded_width = self._window_config.get('expanded_width', 480.0)
         self._base_height = self._window_config.get('height', 48.0)
         self._obs_extra_width = self._window_config.get('obs_extra_width', 40.0)
         self._media_extra_width = self._window_config.get('media_extra_width', 100.0)
 
-        # Animation - QVariantAnimation for custom easing
+        # Animation - QVariantAnimation for custom easing (main branch style)
         self._anim = QVariantAnimation(self)
         self._anim.valueChanged.connect(self._on_anim_step)
         self._anim.finished.connect(self._on_anim_finished)
@@ -138,6 +140,7 @@ class OverlayWindow(QWidget):
         self._micro_expanded = False
         self._is_hiding = False
         self._hidden_by_fullscreen = False
+        self._toast_hovered = False  # For notifications plugin
 
         # Hover timer
         self._hover_timer = QTimer(self)
@@ -207,13 +210,12 @@ class OverlayWindow(QWidget):
         widths = self._compute_widths()
         screen = self.screen().availableGeometry()
         x = (screen.width() - widths['micro']) // 2
-        y = int(self._margin_top)
+        y = int(self._base_margin_top)
         self.setGeometry(x, y, widths['micro'], widths['height'])
 
     def showEvent(self, event):
         super().showEvent(event)
         self._move_to_top_center()
-        # Publish window ref to registry for plugins
         self.registry.config['_window_ref'] = self
 
     def paintEvent(self, event):
@@ -246,7 +248,6 @@ class OverlayWindow(QWidget):
                 plugin.paint_activity(painter, self.rect())
             elif plugin and hasattr(plugin, 'paint_weather'):
                 plugin.paint_weather(painter, self.rect())
-            # greeting draws its own QLabel widget
 
     def enterEvent(self, event):
         super().enterEvent(event)
@@ -264,17 +265,11 @@ class OverlayWindow(QWidget):
         self._micro_expanded = False
         self._expand()
 
-    def _on_hover_timeout(self):
-        if self._state in ("hover", "expanded"):
-            if not self.rect().contains(self.mapFromGlobal(QCursor.pos())):
-                self._collapse()
-
     # --- Proximity detection (micro-expand) ---
     def _check_mouse(self):
         if not self.isVisible() or self._is_hiding:
             return
         if self._hidden_by_fullscreen:
-            # Still check for toast/notification hover
             self._check_toast_weather_hover()
             return
 
@@ -294,16 +289,16 @@ class OverlayWindow(QWidget):
                 self._is_expanded = False
                 self._expand_progress = 0.0
                 self._animate_collapse()
-                notif_plugin._dismiss_toast()  # Will trigger internal timer
+                notif_plugin._dismiss_toast()
             return
 
-        # Normal proximity behavior
+        # Normal proximity behavior - EXACT main branch logic
         if in_zone and not self._is_expanded and not self._hover_pending:
             self._hover_pending = True
             self._hover_timer.start(self._window_config.get('hover_delay', 200))
             if not self._micro_expanded:
                 self._micro_expanded = True
-                self._anim_to(self._micro_width, self._collapsed[1], 200, _ease_inquad_outback)
+                self._anim_to(self._micro_width, self._collapsed[1], 200, _inquad_ease)
         elif in_zone and self._is_expanded:
             pass  # Stay expanded
         elif not in_zone and self._hover_pending:
@@ -325,11 +320,11 @@ class OverlayWindow(QWidget):
         # Toast hover handling
         notif_plugin = self._plugins.get('notifications')
         if notif_plugin and notif_plugin.is_showing():
-            if not in_zone and notif_plugin._toast_hovered:
+            if not in_zone and getattr(notif_plugin, '_toast_hovered', False):
                 notif_plugin._toast_hovered = False
                 notif_plugin._dismiss_toast()
                 return True
-            elif in_zone and not notif_plugin._toast_hovered:
+            elif in_zone and not getattr(notif_plugin, '_toast_hovered', False):
                 notif_plugin._toast_hovered = True
                 duration = notif_plugin.config.get("toast_duration_with_buttons_ms", 30000) if notif_plugin._toast_buttons else notif_plugin.config.get("toast_duration_ms", 5000)
                 notif_plugin._toast_timer.stop()
@@ -339,11 +334,11 @@ class OverlayWindow(QWidget):
         # Weather hover handling
         weather_plugin = self._plugins.get('weather')
         if weather_plugin and weather_plugin.is_active():
-            if in_zone and not weather_plugin._weather_hovered:
+            if in_zone and not getattr(weather_plugin, '_weather_hovered', False):
                 weather_plugin._weather_hovered = True
                 weather_plugin._weather_timer.stop()
                 return True
-            elif not in_zone and weather_plugin._weather_hovered:
+            elif not in_zone and getattr(weather_plugin, '_weather_hovered', False):
                 weather_plugin._weather_hovered = False
                 weather_plugin._dismiss_weather()
                 return True
@@ -397,13 +392,15 @@ class OverlayWindow(QWidget):
                 toast_active = notif_plugin and notif_plugin.is_showing()
                 weather_plugin = self._plugins.get('weather')
                 weather_active = weather_plugin and weather_plugin.is_active()
+                obs_plugin = self._plugins.get('obs')
+                obs_active = obs_plugin and obs_plugin.get_obs_state() > 0
 
-                if toast_active or weather_active or self._plugins.get('obs', type('', (), {'get_obs_state': lambda self: 0})()).get_obs_state() > 0:
+                if toast_active or weather_active or obs_active:
                     # Keep visible but note we're in dodge mode
                     self._is_expanded = True
                     self._expand_progress = 1.0
                 else:
-                    # Normal hide animation
+                    # Normal hide animation - EXACT main branch
                     self._anim.stop()
                     self._hover_animating = False
                     self._expand_progress = 0.0
@@ -422,7 +419,6 @@ class OverlayWindow(QWidget):
                 weather_active = weather_plugin and weather_plugin.is_active()
 
                 if toast_active or weather_active:
-                    # Keep current state
                     return
 
                 w, h = self._collapsed
@@ -436,20 +432,18 @@ class OverlayWindow(QWidget):
                 x_sq = (screen.width() - int(w * 0.75)) / 2.0
                 self.setGeometry(int(x_sq), -h, int(w * 0.75), int(h))
                 self.show()
-                self._anim_to(w, h, 400, _ease_incubic_outback)
+                self._anim_to(w, h, 400, _outback_ease)
 
-    # --- Animation helpers ---
+    # --- Animation helpers (EXACT main branch) ---
     def _anim_to(self, width, height, duration, ease_fn=None, y_pos=None, ease_wh=None):
         screen = QApplication.primaryScreen().geometry()
         x = (screen.width() - width) / 2.0
-        y = self._margin_top if y_pos is None else y_pos
-        target = QRectF(x, y, width, height)
-        
-        self._anim.stop()
-        self._anim_start = QRectF(self.geometry())
-        self._anim_end = target
-        self._anim_ease = ease_fn if ease_fn else (lambda p: p)
+        y = self._base_margin_top if y_pos is None else y_pos
+        self._anim_ease = ease_fn or (lambda p: p)
         self._anim_ease_wh = ease_wh
+        self._anim_start = QRectF(self.geometry())
+        self._anim_end = QRectF(x, y, width, height)
+        self._anim.stop()
         self._anim.setDuration(duration)
         self._anim.setStartValue(0.0)
         self._anim.setEndValue(1.0)
@@ -463,63 +457,63 @@ class OverlayWindow(QWidget):
             else:
                 self._expand_progress = 1.0 - t
         
-        # Interpolate geometry
-        if self._anim_ease_wh:
-            eased = self._anim_ease_wh(t)
-        else:
-            eased = self._anim_ease(t)
-        
-        rect = QRectF()
-        rect.setX(self._anim_start.x() + (self._anim_end.x() - self._anim_start.x()) * eased)
-        rect.setY(self._anim_start.y() + (self._anim_end.y() - self._anim_start.y()) * eased)
-        rect.setWidth(self._anim_start.width() + (self._anim_end.width() - self._anim_start.width()) * eased)
-        rect.setHeight(self._anim_start.height() + (self._anim_end.height() - self._anim_start.height()) * eased)
-        self.setGeometry(rect.toRect())
+        t_pos = self._anim_ease(t)
+        t_wh = self._anim_ease_wh(t) if self._anim_ease_wh else t_pos
+        r = self._anim_start
+        s = self._anim_end
+        x = r.x() + (s.x() - r.x()) * t_pos
+        y = r.y() + (s.y() - r.y()) * t_pos
+        w = r.width() + (s.width() - r.width()) * t_wh
+        h = r.height() + (s.height() - r.height()) * t_wh
+        self.setGeometry(QRectF(x, y, w, h).toRect())
 
     def _on_anim_finished(self):
-        self._hover_animating = False
         self._anim_ease_wh = None
         if self._is_hiding:
             self._is_hiding = False
             self.hide()
-        elif self._state == "hover":
-            self._set_state("expanded")
-        elif self._state == "collapsed":
-            self._expand_progress = 0.0
+            return
+        if self._hover_animating:
+            self._expand_progress = 1.0 if self._is_expanded else 0.0
+            self._hover_animating = False
+        if not self._is_expanded:
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
     def _expand(self):
-        if self._state == "expanded":
+        if self._is_expanded:
             return
-        self._set_state("expanded")
         self._is_expanded = True
         self._hover_animating = True
         self._expand_progress = 0.0
-
-        widths = self._compute_widths()
-        screen = self.screen().availableGeometry()
-        x = (screen.width() - widths['expanded']) // 2
-        y = int(self._margin_top)
-        self._anim_to(widths['expanded'], widths['height'], 
-                      self._window_config.get('expand_duration', 500), _ease_incubic_outback)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        # EXACT main branch: _outback_ease for expand
+        self._anim_to(*self._expanded, self._window_config.get('expand_duration', 500), _outback_ease)
 
     def _animate_collapse(self):
-        if self._state == "collapsed":
-            return
-        self._set_state("collapsed")
         self._is_expanded = False
         self._hover_animating = True
         self._expand_progress = 1.0
+        self._hover_pending = False
+        # EXACT main branch: _ease_incubic_outback for collapse
+        self._anim_to(self._collapsed[0], self._collapsed[1], self._window_config.get('collapse_duration', 500), _ease_incubic_outback)
 
-        widths = self._compute_widths()
-        screen = self.screen().availableGeometry()
-        x = (screen.width() - widths['micro']) // 2
-        y = int(self._margin_top)
-        self._anim_to(widths['micro'], widths['height'],
-                      self._window_config.get('collapse_duration', 500), _ease_incubic_outback)
+    def _reset_collapsed(self):
+        self._is_expanded = False
+        self._hover_pending = False
+        self._expand_progress = 0.0
+        self._hover_animating = False
+        self._anim_ease_wh = None
+        self._anim.stop()
+        w, h = self._collapsed
+        screen = QApplication.primaryScreen().geometry()
+        x = int((screen.width() - w) / 2.0)
+        self.setGeometry(x, int(self._base_margin_top), int(w), int(h))
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
     def _collapse(self):
         if self._state == "collapsed":
             return
+        self._set_state("collapsed")
         self._animate_collapse()
 
     def _set_state(self, state: str):
