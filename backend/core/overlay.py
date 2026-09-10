@@ -1,3 +1,4 @@
+from typing import Dict, Any, Optional, List, Tuple
 from PySide6.QtCore import Qt, QTimer, QRect, QRectF, QEasingCurve, QPropertyAnimation, QVariantAnimation, QEvent
 from PySide6.QtWidgets import QWidget, QApplication
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QFont, QCursor, QPen, QBrush, QRadialGradient
