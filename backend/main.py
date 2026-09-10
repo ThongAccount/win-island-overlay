@@ -61,6 +61,13 @@ def main():
 
     # Create overlay window
     overlay = OverlayWindow(registry, config)
+
+    # Register plugins with overlay for paint/event integration
+    for name in ['obs', 'media', 'notifications', 'greeting', 'activity']:
+        plugin = registry.get(name)
+        if plugin:
+            overlay.register_plugin(name, plugin)
+
     overlay.show()
 
     # Auto-reload on .py file changes
