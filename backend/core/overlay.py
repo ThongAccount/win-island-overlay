@@ -3,9 +3,9 @@ from PySide6.QtCore import Qt, QTimer, QPoint, QRect, QEasingCurve, QPropertyAni
 from PySide6.QtWidgets import QWidget, QVBoxLayout
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QFont, QCursor
 
-from ..core.plugin import PluginRegistry
-from ..core.events import EventBus, WindowStateChanged
-from ..plugins import discover_plugins
+from backend.core.plugin import PluginRegistry
+from backend.core.events import EventBus, WindowStateChanged
+from backend.plugins import discover_plugins
 
 
 class OverlayWindow(QWidget):

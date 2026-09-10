@@ -5,9 +5,9 @@ from PySide6.QtCore import QTimer, QEvent, Qt, QRect
 from PySide6.QtGui import QPainter, QColor, QFont, QPixmap, QImage
 from PySide6.QtWidgets import QLabel
 
-from ..core.plugin import PluginBase, island_plugin, PluginRegistry
-from ..core.events import EventBus, OBSStateChanged, WindowStateChanged
-from ..core.overlay import OverlayWindow
+from backend.core.plugin import PluginBase, island_plugin, PluginRegistry
+from backend.core.events import EventBus, OBSStateChanged, WindowStateChanged
+from backend.core.overlay import OverlayWindow
 
 
 # Custom event for OBS icon

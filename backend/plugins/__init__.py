@@ -1,7 +1,7 @@
 from pathlib import Path
 from importlib import import_module
 from typing import List
-from ..core.plugin import PluginBase, PluginRegistry
+from backend.core.plugin import PluginBase, PluginRegistry
 
 
 def discover_plugins(registry: PluginRegistry) -> List[str]:

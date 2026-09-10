@@ -6,9 +6,9 @@ from dataclasses import dataclass, field
 from PySide6.QtCore import QTimer, QEvent, Qt
 from PySide6.QtWidgets import QLabel
 
-from ..core.plugin import PluginBase, island_plugin, PluginRegistry
-from ..core.events import EventBus, ForegroundWindowChanged, ConfigChanged
-from ..core.overlay import OverlayWindow
+from backend.core.plugin import PluginBase, island_plugin, PluginRegistry
+from backend.core.events import EventBus, ForegroundWindowChanged, ConfigChanged
+from backend.core.overlay import OverlayWindow
 
 
 # Custom event for foreground window change
