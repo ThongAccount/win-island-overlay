@@ -1,22 +1,12 @@
 from typing import Dict, Any, Optional
 import threading
 import time
-from PySide6.QtCore import QTimer, QEvent, Qt, QRect
-from PySide6.QtGui import QPainter, QColor, QFont, QPixmap, QImage
+from PySide6.QtCore import QTimer, QEvent, Qt
 from PySide6.QtWidgets import QLabel
 
 from backend.core.plugin import PluginBase, island_plugin, PluginRegistry
 from backend.core.events import EventBus
-from backend.core.overlay import OverlayWindow
-
-
-# Custom event for weather
-class WeatherEvent(QEvent):
-    _type = QEvent.Type(QEvent.registerEventType())
-
-    def __init__(self, data: Dict[str, Any]):
-        super().__init__(self._type)
-        self.data = data  # temp, condition, location, feels_like, humidity, wind, aqi, aqi_level, icon
+from backend.core.overlay import OverlayWindow, WeatherEvent
 
 
 @island_plugin(
@@ -40,7 +30,7 @@ class WeatherPlugin(PluginBase):
         super().__init__(registry, config)
         self._window: Optional[OverlayWindow] = None
         
-        # Weather state
+        # Weather state (overlay owns rendering state)
         self._weather_data: Optional[Dict[str, Any]] = None
         self._weather_active = False
         self._weather_dismissed = False
@@ -265,6 +255,7 @@ class WeatherPlugin(PluginBase):
         self._weather_text_anim.timeout.connect(step)
         self._weather_text_anim.start(step_ms)
 
+    # --- Data getters for overlay ---
     def is_active(self) -> bool:
         return self._weather_active and self._weather_alpha > 0
 
@@ -279,56 +270,3 @@ class WeatherPlugin(PluginBase):
 
     def get_text_alpha(self) -> float:
         return self._weather_text_alpha
-
-    def paint_weather(self, painter: QPainter, rect: QRect):
-        """Called from OverlayWindow.paintEvent."""
-        if not self._weather_active or not self._weather_data:
-            return
-        
-        painter.save()
-        painter.setOpacity(self._weather_text_alpha)
-        
-        # Background
-        notif_w = min(420, rect.width() - 40)
-        notif_h = 72
-        notif_x = (rect.width() - notif_w) // 2
-        notif_y = rect.bottom() + 8
-        
-        painter.setBrush(QColor(20, 20, 30, 220))
-        painter.setPen(QColor(100, 200, 100, 180))
-        painter.drawRoundedRect(notif_x, notif_y, notif_w, notif_h, 12, 12)
-        
-        # Icon
-        icon_size = int(28 * self._weather_icon_progress)
-        if icon_size > 0:
-            painter.setOpacity(self._weather_icon_progress)
-            font = QFont("Segoe UI Emoji", icon_size)
-            painter.setFont(font)
-            painter.setPen(QColor(255, 255, 255, 230))
-            icon_x = notif_x + 14
-            icon_y = notif_y + (notif_h - icon_size) // 2
-            painter.drawText(icon_x, icon_y + icon_size, self._weather_data.get('icon', '⛅'))
-        
-        # Text
-        painter.setOpacity(self._weather_text_alpha)
-        
-        # Location + temp
-        painter.setPen(QColor(255, 255, 255, 230))
-        font = QFont("Segoe UI", 11, QFont.Weight.DemiBold)
-        painter.setFont(font)
-        temp_text = f"{self._weather_data.get('temp', '?')}°C  {self._weather_data.get('condition', '')}"
-        painter.drawText(notif_x + 50, notif_y + 24, temp_text)
-        
-        # Details
-        font.setPointSize(8)
-        font.setWeight(QFont.Weight.Normal)
-        painter.setFont(font)
-        painter.setPen(QColor(180, 180, 180, 200))
-        details = f"Feels like {self._weather_data.get('feels_like', '?')}°C  |  {self._weather_data.get('humidity', '?')}% humidity  |  {self._weather_data.get('wind', '?')}"
-        painter.drawText(notif_x + 50, notif_y + 44, details)
-        
-        # AQI
-        aqi_text = f"AQI: {self._weather_data.get('aqi', '?')} ({self._weather_data.get('aqi_level', '?')})"
-        painter.drawText(notif_x + 50, notif_y + 58, aqi_text)
-        
-        painter.restore()

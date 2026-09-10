@@ -1,8 +1,10 @@
 from typing import Dict, Any
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QLabel, QVBoxLayout
+
 from backend.core.plugin import PluginBase, island_plugin, PluginRegistry
 from backend.core.events import EventBus, WindowStateChanged
+
 
 @island_plugin(
     name="greeting",

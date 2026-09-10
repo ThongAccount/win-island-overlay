@@ -421,15 +421,3 @@ class ActivityPlugin(PluginBase):
             self._switch_profile(profile)
             return True
         return False
-
-    def paint_activity(self, painter, rect):
-        """Optional: paint current profile indicator."""
-        if not self._current_profile:
-            return
-        
-        painter.save()
-        painter.setPen(QColor(100, 200, 100, 180))
-        font = QFont("Segoe UI", 7)
-        painter.setFont(font)
-        painter.drawText(rect.right() - 80, rect.bottom() - 4, f"[{self._current_profile.name}]")
-        painter.restore()

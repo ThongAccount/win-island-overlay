@@ -8,16 +8,7 @@ from PySide6.QtGui import QPixmap, QPainter, QColor, QFont, QPainterPath, QImage
 
 from backend.core.plugin import PluginBase, island_plugin, PluginRegistry
 from backend.core.events import EventBus, MediaSessionChanged, WindowStateChanged
-from backend.core.overlay import OverlayWindow
-
-
-# Custom event for media updates from background thread
-class MediaResultEvent(QEvent):
-    _type = QEvent.Type(QEvent.registerEventType())
-
-    def __init__(self, result):
-        super().__init__(self._type)
-        self.result = result  # (title, artist, app_name, status, thumb_bytes, pos, dur, session)
+from backend.core.overlay import OverlayWindow, MediaResultEvent
 
 
 # Audio FFT capture (from main branch - WASAPI loopback with frequency band mapping)
@@ -165,7 +156,7 @@ class MediaPlugin(PluginBase):
         super().__init__(registry, config)
         self._window: Optional[OverlayWindow] = None
         
-        # Media state
+        # Media state (overlay owns rendering state, we provide data)
         self._media_state = 0  # 0=none, 1=paused, 2=playing
         self._media_title = ""
         self._media_artist = ""
@@ -173,29 +164,16 @@ class MediaPlugin(PluginBase):
         self._media_thumb_bytes = b""
         self._media_position = 0.0
         self._media_duration = 0.0
-        self._pos_display = 0.0
         self._media_session = None
         self._media_loop = None
         self._media_seq = 0
         self._media_was_active = False
         self._media_thumb_key = ""
         self._media_thumb_cache = None
-        self._media_thumb_pixmap: Optional[QPixmap] = None
         
         # Visualizer
         self._audio_fft: Optional[AudioFFT] = None
-        self._viz_bars = [0.0] * 8
-        self._audio_levels = [0.0] * 8
         self._viz_timer: Optional[QTimer] = None
-        
-        # Animation
-        self._media_alpha = 0.0
-        self._media_text_alpha = 1.0
-        self._title_scroll = 0.0
-        self._title_scroll_anim: Optional[QTimer] = None
-        self._media_alpha_anim: Optional[QTimer] = None
-        self._media_text_anim: Optional[QTimer] = None
-        self._media_position_fetch_time = 0.0
         
         # Threading
         self._media_thread: Optional[threading.Thread] = None
@@ -417,7 +395,6 @@ class MediaPlugin(PluginBase):
         # Only update position if it actually changed or state changed
         if abs(pos_sec - self._media_position) > 0.5 or prev_state != new_state or prev_state == 0:
             self._media_position = pos_sec
-            self._pos_display = pos_sec
             # Reset to current time to restart interpolation from this position
             self._media_position_fetch_time = time.time() if new_state == 2 else 0.0
         
@@ -429,12 +406,10 @@ class MediaPlugin(PluginBase):
         elif new_state == 0 and prev_state == 0:
             self._media_thumb_key = ''
             self._media_thumb_cache = None
-            self._media_thumb_pixmap = None
         elif thumb_key != self._media_thumb_key:
-            self._media_thumb_pixmap = None
+            pass  # Keep cached thumbnail
 
         if text_changed and new_state > 0:
-            self._media_text_alpha = 0.0
             self._animate_media_text_alpha(1.0, 300)
             self._start_title_scroll()
         else:
@@ -444,15 +419,8 @@ class MediaPlugin(PluginBase):
             if new_state > 0 and prev_state == 0:
                 self._media_alpha = 0.0
                 self._animate_media_alpha(1.0, 300)
-                
-                if not self._window.property("_hidden_by_fullscreen") and self._window.isVisible():
-                    # Window will handle resize via event
-                    pass
             elif new_state == 0 and prev_state > 0:
                 self._animate_media_alpha(0.0, 300)
-                self._delayed_media_resize()
-            elif self._window.property("_is_expanded"):
-                pass  # Window handles resize
         
         if need_resize or meta_changed:
             if self._window:
@@ -460,16 +428,15 @@ class MediaPlugin(PluginBase):
 
     def _load_thumbnail(self, thumb_bytes: bytes):
         if not thumb_bytes:
-            self._media_thumb_pixmap = None
             return
         try:
             img = QImage.fromData(thumb_bytes)
             if not img.isNull():
-                self._media_thumb_pixmap = QPixmap.fromImage(img).scaled(
+                self._media_thumb = QPixmap.fromImage(img).scaled(
                     48, 48, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
                 )
         except:
-            self._media_thumb_pixmap = None
+            pass
 
     def _animate_media_alpha(self, target: float, duration: int):
         if self._media_alpha_anim:
@@ -542,10 +509,7 @@ class MediaPlugin(PluginBase):
         if changed and self._media_state > 0 and self._window:
             self._window.update()
 
-    def _delayed_media_resize(self):
-        # Window handles resize via event
-        pass
-
+    # --- Data getters for overlay ---
     def get_media_state(self) -> int:
         return self._media_state
 
@@ -557,21 +521,20 @@ class MediaPlugin(PluginBase):
             "app": self._media_app,
             "position": self._media_position,
             "duration": self._media_duration,
-            "pos_display": self._pos_display,
-            "thumb_pixmap": self._media_thumb_pixmap,
+            "thumb_pixmap": getattr(self, '_media_thumb', None),
         }
 
     def get_visualizer_bands(self) -> list:
-        return self._viz_bars[:]
+        return getattr(self, '_viz_bars', [0.0] * 8)[:]
 
     def get_alpha(self) -> float:
-        return self._media_alpha
+        return getattr(self, '_media_alpha', 0.0)
 
     def get_text_alpha(self) -> float:
-        return self._media_text_alpha
+        return getattr(self, '_media_text_alpha', 1.0)
 
     def get_title_scroll(self) -> float:
-        return self._title_scroll
+        return getattr(self, '_title_scroll', 0.0)
 
     def do_action(self, action: str, seek_seconds: Optional[float] = None):
         """Play/pause/next/prev/seek with optimistic UI update."""
@@ -602,116 +565,3 @@ class MediaPlugin(PluginBase):
                 print(f"[media] Action error: {e}")
         
         asyncio.run_coroutine_threadsafe(do_async(), self._media_loop)
-
-    def paint_media(self, painter: QPainter, rect: QRect, is_expanded: bool):
-        """Called from OverlayWindow.paintEvent to render media UI."""
-        if self._media_state == 0 or self._media_alpha <= 0:
-            return
-        
-        painter.save()
-        painter.setOpacity(self._media_alpha)
-        
-        # Album art
-        if self.config.get("show_album_art", True) and self._media_thumb_pixmap:
-            thumb_rect = QRect(rect.left() + 12, rect.top() + 12, 48, 48)
-            painter.drawPixmap(thumb_rect, self._media_thumb_pixmap)
-        
-        # Title/artist text
-        if self._media_text_alpha > 0:
-            painter.setOpacity(self._media_text_alpha)
-            font = QFont("Segoe UI", 10, QFont.Weight.Medium)
-            painter.setFont(font)
-            painter.setPen(QColor(255, 255, 255, 230))
-            
-            text_x = rect.left() + 72
-            text_y = rect.top() + 18
-            
-            # Scroll long titles
-            title_text = self._media_title
-            if self._media_artist:
-                title_text += f" — {self._media_artist}"
-            
-            metrics = painter.fontMetrics()
-            text_width = metrics.horizontalAdvance(title_text)
-            available = rect.width() - 84
-            
-            if text_width > available:
-                # Scroll
-                scroll = self._title_scroll % (text_width + available + 50)
-                draw_x = text_x - scroll
-                painter.drawText(draw_x, text_y, title_text)
-                # Draw second copy for seamless loop
-                painter.drawText(draw_x + text_width + 50, text_y, title_text)
-            else:
-                painter.drawText(text_x, text_y, title_text)
-            
-            # Playback status
-            status_text = "Now Playing" if self._media_state == 2 else "Paused"
-            painter.setPen(QColor(180, 180, 180, 200))
-            font.setPointSize(8)
-            painter.setFont(font)
-            painter.drawText(text_x, text_y + 18, status_text)
-        
-        # Visualizer bars
-        if self.config.get("show_visualizer", True) and self._audio_fft:
-            bands = self._viz_bars
-            bar_w = 4
-            gap = 2
-            total_w = len(bands) * (bar_w + gap) - gap
-            start_x = rect.right() - total_w - 12
-            base_y = rect.bottom() - 8
-            max_h = rect.height() - 20
-            
-            color = QColor(self.config.get("visualizer_color", "#00ff88"))
-            for i, band in enumerate(bands):
-                h = int(band * max_h)
-                x = start_x + i * (bar_w + gap)
-                painter.fillRect(x, base_y - h, bar_w, h, color)
-        
-        # Playback controls (expanded only)
-        if is_expanded and self.config.get("show_controls", True):
-            self._paint_controls(painter, rect)
-        
-        painter.restore()
-
-    def _paint_controls(self, painter: QPainter, rect: QRect):
-        """Paint playback controls in expanded mode."""
-        btn_size = 28
-        spacing = 16
-        total_w = 5 * btn_size + 4 * spacing
-        start_x = (rect.width() - total_w) // 2
-        y = rect.bottom() - btn_size - 8
-        
-        icons = ["⏮", "⏪", "⏸" if self._media_state == 2 else "▶", "⏩", "⏭"]
-        actions = ["prev", "rewind", "play_pause", "forward", "next"]
-        
-        for i, (icon, action) in enumerate(zip(icons, actions)):
-            x = start_x + i * (btn_size + spacing)
-            btn_rect = QRect(x, y, btn_size, btn_size)
-            
-            painter.setPen(QColor(255, 255, 255, 100))
-            painter.setBrush(QColor(255, 255, 255, 30))
-            painter.drawRoundedRect(btn_rect, 14, 14)
-            
-            font = QFont("Segoe UI Emoji", 14)
-            painter.setFont(font)
-            painter.setPen(QColor(255, 255, 255, 220))
-            painter.drawText(btn_rect, Qt.AlignmentFlag.AlignCenter, icon)
-            
-            if not hasattr(self, '_control_rects'):
-                self._control_rects = []
-            while len(self._control_rects) <= i:
-                self._control_rects.append(QRect())
-            self._control_rects[i] = btn_rect
-
-    def handle_click(self, pos) -> bool:
-        """Handle click on media controls. Returns True if handled."""
-        if not hasattr(self, '_control_rects'):
-            return False
-        for i, rect in enumerate(self._control_rects):
-            if rect.contains(pos):
-                actions = ["prev", "rewind", "play_pause", "forward", "next"]
-                if i < len(actions):
-                    self.do_action(actions[i])
-                    return True
-        return False

@@ -11,15 +11,6 @@ from backend.core.events import EventBus, OBSStateChanged, WindowStateChanged
 from backend.core.overlay import OverlayWindow
 
 
-# Custom event for OBS icon
-class OBSIconEvent(QEvent):
-    _type = QEvent.Type(QEvent.registerEventType())
-
-    def __init__(self, pixmap: Optional[QPixmap]):
-        super().__init__(self._type)
-        self.pixmap = pixmap
-
-
 # Structures from main branch
 class PROCESSENTRY32(ctypes.Structure):
     _fields_ = [
@@ -70,15 +61,14 @@ class OBSPlugin(PluginBase):
         super().__init__(registry, config)
         self._window: Optional[OverlayWindow] = None
         
-        # OBS state
+        # OBS state (overlay owns rendering state)
         self._obs_state = 0  # 0=none, 1=idle, 2=recording/streaming
         self._obs_draw_state = 0  # lags behind for fade-out
         self._obs_alpha = 0.0
         self._notification_active = False
         self._notification_type = 0  # 0=off, 1=recording started, 2=streaming started
-        self._notif_alpha = 0.0
-        self._notif_text_alpha = 0.0
         self._notif_icon_progress = 0.0
+        self._notif_text_alpha = 0.0
         
         # Timers
         self._obs_timer: Optional[QTimer] = None
@@ -154,7 +144,7 @@ class OBSPlugin(PluginBase):
                 <circle cx="12" cy="12" r="10"/>
                 <path d="M12 8v8M8 12h8"/>
             </svg>'''
-            png_bytes = cairosvg.svg2png(bytestring=svg.encode(), output_width=48, output_height=48)
+            png_bytes = cairosvg.svg2png(bytestring=svg.encode(), output_width=64, output_height=64)
             img = QImage.fromData(png_bytes)
             self._obs_icon = QPixmap.fromImage(img)
         except:
@@ -163,16 +153,16 @@ class OBSPlugin(PluginBase):
 
     def _generate_obs_icon(self) -> QPixmap:
         """Generate OBS icon programmatically."""
-        pixmap = QPixmap(48, 48)
+        pixmap = QPixmap(64, 64)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(QColor(255, 0, 0, 255))
         painter.setBrush(QColor(255, 0, 0, 50))
-        painter.drawEllipse(4, 4, 40, 40)
+        painter.drawEllipse(4, 4, 56, 56)
         painter.setPen(QColor(255, 255, 255, 255))
-        painter.drawLine(24, 12, 24, 36)
-        painter.drawLine(12, 24, 36, 24)
+        painter.drawLine(32, 16, 32, 48)
+        painter.drawLine(16, 32, 48, 32)
         painter.end()
         return pixmap
 
@@ -226,7 +216,7 @@ class OBSPlugin(PluginBase):
                     new_state = 1
 
             # Post result to main thread
-            QTimer.singleShot(0, lambda: self._on_obs_result(new_state))
+            QTimer.singleShot(0, lambda: self._on_obs_result(new_state, recording, streaming))
             
         except Exception as e:
             print(f"[obs] Check error: {e}")
@@ -284,7 +274,7 @@ class OBSPlugin(PluginBase):
         except Exception:
             return {'recording': False, 'streaming': False}
 
-    def _on_obs_result(self, new_state: int):
+    def _on_obs_result(self, new_state: int, recording: bool, streaming: bool):
         """Handle OBS check result on main thread."""
         if not self._window:
             return
@@ -307,7 +297,7 @@ class OBSPlugin(PluginBase):
                     self._show_notification(1)  # Recording started
                 elif old_state == 2 and new_state == 1:
                     self._show_notification(2)  # Streaming started
-                elif (self._window.property("_hidden_by_fullscreen") or not self._window.isVisible()) and not self._plugins_get_notifications_active():
+                elif (self._window.property("_hidden_by_fullscreen") or not self._window.isVisible()):
                     # If hidden and no toast, just update state without animation
                     self._obs_alpha = 1.0 if new_state > 0 else 0.0
                     if new_state == 0:
@@ -318,27 +308,20 @@ class OBSPlugin(PluginBase):
                 else:
                     if new_state > 0:
                         self._obs_fade_timer.start(500 - int(500 * 0.50))
-                        self._anim_to(self._collapsed[0], self._collapsed[1], 500, _ease_incubic_outback)
+                        self._window._anim_to(*self._window._collapsed, 500, _ease_incubic_outback)
                     else:
                         self._notification_active = False
                         self._animate_obs_alpha(0.0, int(500 * 0.50))
-                        self._anim_to(self._collapsed[0], self._collapsed[1], 500, _ease_incubic_outback)
+                        self._window._anim_to(*self._window._collapsed, 500, _ease_incubic_outback)
             
             # Publish event
             self.registry.event_bus.publish(OBSStateChanged(
-                recording=(new_state == 2 and self._last_check_recording),
-                streaming=(new_state == 2 and self._last_check_streaming)
+                recording=recording,
+                streaming=streaming
             ))
             
             if self._window:
                 self._window.update()
-
-    def _plugins_get_notifications_active(self) -> bool:
-        """Check if notifications plugin has active toast."""
-        notif_plugin = self._plugins.get('notifications') if hasattr(self, '_plugins') else None
-        if notif_plugin:
-            return notif_plugin.is_showing()
-        return False
 
     def _start_obs_fade_in(self):
         self._animate_obs_alpha(1.0, 500)
@@ -434,25 +417,15 @@ class OBSPlugin(PluginBase):
         self._notif_text_anim.timeout.connect(step)
         self._notif_text_anim.start(step_ms)
 
-    def _anim_to(self, width, height, duration, ease_fn):
-        """Delegate to window's _anim_to."""
-        if self._window:
-            self._window._anim_to(width, height, duration, ease_fn)
-
-    def _collapsed(self):
-        """Get collapsed dimensions from window."""
-        if self._window:
-            return self._window._collapsed
-        return (240, 48)
-
+    # --- Data getters for overlay ---
     def get_obs_state(self) -> int:
         return self._obs_state
 
     def is_recording(self) -> bool:
-        return self._obs_state == 2 and self._last_check_recording
+        return self._obs_state == 2
 
     def is_streaming(self) -> bool:
-        return self._obs_state == 2 and self._last_check_streaming
+        return self._obs_state == 2
 
     def get_alpha(self) -> float:
         return self._obs_alpha
@@ -465,84 +438,3 @@ class OBSPlugin(PluginBase):
             "text_alpha": self._notif_text_alpha,
             "icon_progress": self._notif_icon_progress,
         }
-
-    def paint_obs(self, painter: QPainter, rect: QRect, is_expanded: bool):
-        """Called from OverlayWindow.paintEvent."""
-        # Store last check results for paint
-        self._last_check_recording = False
-        self._last_check_streaming = False
-        
-        # Draw OBS icon in collapsed/expanded pill
-        if self._obs_state > 0 and self._obs_alpha > 0 and self._obs_icon:
-            painter.save()
-            painter.setOpacity(self._obs_alpha)
-            
-            icon_size = self.config.get("icon_size", 24)
-            icon_x = rect.right() - icon_size - 10
-            icon_y = (rect.height() - icon_size) // 2
-            
-            # Pulsing animation when recording/streaming
-            if self._obs_state == 2:  # Recording/streaming
-                import math
-                pulse = 1.0 + 0.15 * math.sin(self._window.property("_pulse_time") or 0)
-                scaled = self._obs_icon.scaled(
-                    int(icon_size * pulse), int(icon_size * pulse),
-                    Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
-                )
-                painter.drawPixmap(
-                    icon_x - (scaled.width() - icon_size) // 2,
-                    icon_y - (scaled.height() - icon_size) // 2,
-                    scaled
-                )
-            else:
-                painter.drawPixmap(icon_x, icon_y, self._obs_icon.scaled(
-                    icon_size, icon_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
-                ))
-            
-            painter.restore()
-
-        # Draw notification
-        if self._notification_active:
-            self._paint_notification(painter, rect)
-
-    def _paint_notification(self, painter: QPainter, rect: QRect):
-        """Paint OBS notification."""
-        painter.save()
-        
-        # Background
-        notif_w = min(380, rect.width() - 20)
-        notif_h = 56
-        notif_x = (rect.width() - notif_w) // 2
-        notif_y = rect.bottom() + 8
-        
-        painter.setOpacity(self._notif_alpha)
-        painter.setBrush(QColor(20, 20, 30, 220))
-        painter.setPen(QColor(255, 0, 0, 180))
-        painter.drawRoundedRect(notif_x, notif_y, notif_w, notif_h, 12, 12)
-        
-        # Icon
-        icon_size = int(28 * self._notif_icon_progress)
-        if icon_size > 0 and self._obs_icon:
-            painter.setOpacity(self._notif_icon_progress)
-            icon_x = notif_x + 14
-            icon_y = notif_y + (notif_h - icon_size) // 2
-            painter.drawPixmap(icon_x, icon_y, self._obs_icon.scaled(
-                icon_size, icon_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
-            ))
-        
-        # Text
-        painter.setOpacity(self._notif_text_alpha)
-        painter.setPen(QColor(255, 255, 255, 230))
-        font = QFont("Segoe UI", 10, QFont.Weight.Medium)
-        painter.setFont(font)
-        
-        text_map = {
-            1: "OBS Studio started recording",
-            2: "OBS Studio started streaming",
-        }
-        text = text_map.get(self._notification_type, "")
-        text_x = notif_x + 50
-        text_y = notif_y + notif_h // 2 + 4
-        painter.drawText(text_x, text_y, text)
-        
-        painter.restore()
