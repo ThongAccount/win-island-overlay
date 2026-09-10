@@ -1,5 +1,6 @@
 from typing import Dict, Any, Optional
 import ctypes
+import ctypes.wintypes
 import threading
 from PySide6.QtCore import QTimer, QEvent, Qt, QRect
 from PySide6.QtGui import QPainter, QColor, QFont, QPixmap, QImage
@@ -17,6 +18,37 @@ class OBSIconEvent(QEvent):
     def __init__(self, pixmap: Optional[QPixmap]):
         super().__init__(self._type)
         self.pixmap = pixmap
+
+
+# Structures from main branch
+class PROCESSENTRY32(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", ctypes.wintypes.DWORD),
+        ("cntUsage", ctypes.wintypes.DWORD),
+        ("th32ProcessID", ctypes.wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+        ("th32ModuleID", ctypes.wintypes.DWORD),
+        ("cntThreads", ctypes.wintypes.DWORD),
+        ("th32ParentProcessID", ctypes.wintypes.DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", ctypes.wintypes.DWORD),
+        ("szExeFile", ctypes.c_wchar * 260),
+    ]
+
+
+class MIB_TCPROW_OWNER_PID(ctypes.Structure):
+    _fields_ = [
+        ('dwState', ctypes.c_ulong),
+        ('dwLocalAddr', ctypes.c_ulong),
+        ('dwLocalPort', ctypes.c_ulong),
+        ('dwRemoteAddr', ctypes.c_ulong),
+        ('dwRemotePort', ctypes.c_ulong),
+        ('dwOwningPid', ctypes.c_ulong),
+    ]
+
+
+MIB_TCP_STATE_ESTAB = 5
+TCP_TABLE_OWNER_PID_ALL = 5
 
 
 @island_plugin(
@@ -39,24 +71,27 @@ class OBSPlugin(PluginBase):
         self._window: Optional[OverlayWindow] = None
         
         # OBS state
-        self._obs_state = 0  # 0=none, 1=recording, 2=streaming, 3=both
+        self._obs_state = 0  # 0=none, 1=idle, 2=recording/streaming
+        self._obs_draw_state = 0  # lags behind for fade-out
         self._obs_alpha = 0.0
-        self._obs_draw_state = 0
-        self._obs_alpha_anim: Optional[QTimer] = None
-        self._obs_icon: Optional[QPixmap] = None
         self._notification_active = False
-        self._notification_type = 0  # 1=recording start, 2=streaming start, 3=stop
+        self._notification_type = 0  # 0=off, 1=recording started, 2=streaming started
         self._notif_alpha = 0.0
         self._notif_text_alpha = 0.0
         self._notif_icon_progress = 0.0
-        self._notif_timer: Optional[QTimer] = None
-        self._notif_text_anim: Optional[QTimer] = None
-        self._notif_icon_anim: Optional[QTimer] = None
         
         # Timers
         self._obs_timer: Optional[QTimer] = None
+        self._obs_fade_timer: Optional[QTimer] = None
+        self._notif_timer: Optional[QTimer] = None
+        self._obs_alpha_anim: Optional[QTimer] = None
+        self._notif_text_anim: Optional[QTimer] = None
+        self._notif_icon_anim: Optional[QTimer] = None
         self._obs_check_thread: Optional[threading.Thread] = None
         self._running = False
+        
+        # OBS icon
+        self._obs_icon: Optional[QPixmap] = None
 
     def on_load(self) -> None:
         pass
@@ -81,6 +116,11 @@ class OBSPlugin(PluginBase):
         # Initial check
         QTimer.singleShot(100, self._check_obs)
         
+        # Fade timer
+        self._obs_fade_timer = QTimer(self._window)
+        self._obs_fade_timer.setSingleShot(True)
+        self._obs_fade_timer.timeout.connect(self._start_obs_fade_in)
+        
         # Notification timer
         self._notif_timer = QTimer(self._window)
         self._notif_timer.setSingleShot(True)
@@ -90,10 +130,12 @@ class OBSPlugin(PluginBase):
         self._running = False
         if self._obs_timer:
             self._obs_timer.stop()
-        if self._obs_check_thread and self._obs_check_thread.is_alive():
-            self._obs_check_thread.join(timeout=1.0)
+        if self._obs_fade_timer:
+            self._obs_fade_timer.stop()
         if self._notif_timer:
             self._notif_timer.stop()
+        if self._obs_check_thread and self._obs_check_thread.is_alive():
+            self._obs_check_thread.join(timeout=1.0)
         if self._obs_alpha_anim:
             self._obs_alpha_anim.stop()
         if self._notif_text_anim:
@@ -107,7 +149,6 @@ class OBSPlugin(PluginBase):
     def _load_obs_icon(self):
         """Load or generate OBS icon."""
         try:
-            # Try to load from cairosvg if available
             import cairosvg
             svg = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <circle cx="12" cy="12" r="10"/>
@@ -143,7 +184,7 @@ class OBSPlugin(PluginBase):
         self._obs_check_thread.start()
 
     def _do_obs_check(self):
-        """Actual OBS process check."""
+        """Actual OBS process check (main branch implementation)."""
         try:
             TH32CS_SNAPPROCESS = 0x00000002
             kernel32 = ctypes.windll.kernel32
@@ -152,43 +193,38 @@ class OBSPlugin(PluginBase):
             if snapshot == -1:
                 return
 
-            class PROCESSENTRY32(ctypes.Structure):
-                _fields_ = [
-                    ("dwSize", ctypes.c_ulong),
-                    ("cntUsage", ctypes.c_ulong),
-                    ("th32ProcessID", ctypes.c_ulong),
-                    ("th32DefaultHeapSize", ctypes.c_ulong),
-                    ("th32ModuleID", ctypes.c_ulong),
-                    ("cntThreads", ctypes.c_ulong),
-                    ("th32ParentProcessID", ctypes.c_ulong),
-                    ("pcPriClassBase", ctypes.c_long),
-                    ("dwFlags", ctypes.c_ulong),
-                    ("szExeFile", ctypes.c_char * 260),
-                ]
+            found = False
+            recording = False
+            obs_pid = 0
+            try:
+                entry = PROCESSENTRY32()
+                entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
+                if kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+                    while True:
+                        name = entry.szExeFile.lower()
+                        if name in ('obs64.exe', 'obs32.exe'):
+                            found = True
+                            obs_pid = entry.th32ProcessID
+                        elif name in ('obs-ffmpeg-mux.exe', 'obs-ffmpeg-mux64.exe'):
+                            recording = True
+                        if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                            break
+            finally:
+                kernel32.CloseHandle(snapshot)
 
-            pe32 = PROCESSENTRY32()
-            pe32.dwSize = ctypes.sizeof(PROCESSENTRY32)
-            
-            obs_pids = []
-            if kernel32.Process32First(snapshot, ctypes.byref(pe32)):
-                while True:
-                    name = pe32.szExeFile.decode('utf-8', errors='ignore').lower()
-                    if 'obs' in name and ('64' in name or '32' in name or 'studio' in name):
-                        obs_pids.append(pe32.th32ProcessID)
-                    if not kernel32.Process32Next(snapshot, ctypes.byref(pe32)):
-                        break
-            
-            kernel32.CloseHandle(snapshot)
-            
             new_state = 0
-            for pid in obs_pids:
-                recording = self._obs_has_connections(pid)
-                streaming = self._obs_check_window(pid)
-                if recording:
-                    new_state |= 1
-                if streaming:
-                    new_state |= 2
-            
+            if found:
+                streaming = obs_pid > 0 and self._obs_has_connections(obs_pid)
+                win = self._obs_check_window()
+                if win['recording']:
+                    recording = True
+                if win['streaming']:
+                    streaming = True
+                if recording or streaming:
+                    new_state = 2
+                else:
+                    new_state = 1
+
             # Post result to main thread
             QTimer.singleShot(0, lambda: self._on_obs_result(new_state))
             
@@ -196,84 +232,116 @@ class OBSPlugin(PluginBase):
             print(f"[obs] Check error: {e}")
 
     def _obs_has_connections(self, pid: int) -> bool:
-        """Check if OBS has active network connections (streaming)."""
+        """Check if OBS has active TCP connections (streaming)."""
         try:
             iphlpapi = ctypes.windll.iphlpapi
             buf_size = ctypes.c_ulong(0)
-            iphlpapi.GetExtendedTcpTable(None, ctypes.byref(buf_size), True, 2, 5, 0)
+            r = iphlpapi.GetExtendedTcpTable(None, ctypes.byref(buf_size), False, 2, TCP_TABLE_OWNER_PID_ALL, 0)
+            if buf_size.value <= 0:
+                return False
             buf = ctypes.create_string_buffer(buf_size.value)
-            if iphlpapi.GetExtendedTcpTable(buf, ctypes.byref(buf_size), True, 2, 5, 0) == 0:
-                # Parse table (simplified)
-                return True  # Assume streaming if we can't parse
-        except:
-            pass
+            r = iphlpapi.GetExtendedTcpTable(buf, ctypes.byref(buf_size), False, 2, TCP_TABLE_OWNER_PID_ALL, 0)
+            if r != 0:
+                return False
+            num_entries = ctypes.cast(buf, ctypes.POINTER(ctypes.c_ulong)).contents.value
+            row_size = ctypes.sizeof(MIB_TCPROW_OWNER_PID)
+            count = 0
+            for i in range(num_entries):
+                offset = 4 + i * row_size
+                row = MIB_TCPROW_OWNER_PID.from_buffer(buf, offset)
+                if row.dwOwningPid == pid and row.dwState == MIB_TCP_STATE_ESTAB:
+                    count += 1
+                    if count >= 3:
+                        return True
+        except Exception:
+            return False
         return False
 
-    def _obs_check_window(self, pid: int) -> bool:
-        """Check if OBS window indicates recording."""
+    def _obs_check_window(self) -> Dict[str, bool]:
+        """Check OBS window title for recording/streaming status."""
         try:
             user32 = ctypes.windll.user32
-            
-            def enum_windows(hwnd, lparam):
-                if not user32.IsWindowVisible(hwnd):
+            result = {'recording': False, 'streaming': False}
+
+            def enum_proc(hwnd, lparam):
+                length = user32.GetWindowTextLengthW(hwnd) + 1
+                if length <= 1:
                     return True
-                _, found_pid = user32.GetWindowThreadProcessId(hwnd)
-                if found_pid == pid:
-                    length = user32.GetWindowTextLengthW(hwnd)
-                    if length > 0:
-                        buff = ctypes.create_unicode_buffer(length + 1)
-                        user32.GetWindowTextW(hwnd, buff, length + 1)
-                        title = buff.value.lower()
-                        if 'recording' in title or '●' in title or 'rec' in title:
-                            ctypes.cast(lparam, ctypes.POINTER(ctypes.c_bool)).contents.value = True
-                            return False
+                buf = ctypes.create_unicode_buffer(length)
+                user32.GetWindowTextW(hwnd, buf, length)
+                t = buf.value.lower()
+                if any(x in t for x in ('obs studio', 'streamlabs obs', 'slobs')):
+                    if 'rec' in t:
+                        result['recording'] = True
+                    if 'live' in t or 'streaming' in t:
+                        result['streaming'] = True
                 return True
-            
-            result = ctypes.c_bool(False)
-            user32.EnumWindows(ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(enum_windows), ctypes.byref(result))
-            return result.value
-        except:
-            return False
+
+            CB_TYPE = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+            cb = CB_TYPE(enum_proc)
+            user32.EnumWindows(cb, 0)
+            return result
+        except Exception:
+            return {'recording': False, 'streaming': False}
 
     def _on_obs_result(self, new_state: int):
-        """Handle OBS check result."""
+        """Handle OBS check result on main thread."""
         if not self._window:
             return
             
         old_state = self._obs_state
         if new_state != old_state:
             self._obs_state = new_state
-            
-            # Animate icon
             if new_state > 0:
-                self._start_obs_fade_in()
-            else:
-                self._start_obs_fade_out()
+                self._obs_draw_state = new_state
             
-            # Show notification
-            if self.config.get("show_notifications", True) and old_state != new_state:
-                if new_state & 1 and not (old_state & 1):
+            self._obs_fade_timer.stop()
+            if self._obs_alpha_anim:
+                self._obs_alpha_anim.stop()
+            if self._notif_timer:
+                self._notif_timer.stop()
+            
+            # Show notification for state changes
+            if self.config.get("show_notifications", True):
+                if old_state == 1 and new_state == 2:
                     self._show_notification(1)  # Recording started
-                elif new_state & 2 and not (old_state & 2):
+                elif old_state == 2 and new_state == 1:
                     self._show_notification(2)  # Streaming started
-                elif old_state > 0 and new_state == 0:
-                    self._show_notification(3)  # Stopped
+                elif (self._window.property("_hidden_by_fullscreen") or not self._window.isVisible()) and not self._plugins_get_notifications_active():
+                    # If hidden and no toast, just update state without animation
+                    self._obs_alpha = 1.0 if new_state > 0 else 0.0
+                    if new_state == 0:
+                        self._obs_draw_state = 0
+                    self._notification_active = False
+                    if self._window:
+                        self._window.update()
+                else:
+                    if new_state > 0:
+                        self._obs_fade_timer.start(500 - int(500 * 0.50))
+                        self._anim_to(self._collapsed[0], self._collapsed[1], 500, _ease_incubic_outback)
+                    else:
+                        self._notification_active = False
+                        self._animate_obs_alpha(0.0, int(500 * 0.50))
+                        self._anim_to(self._collapsed[0], self._collapsed[1], 500, _ease_incubic_outback)
             
             # Publish event
             self.registry.event_bus.publish(OBSStateChanged(
-                recording=bool(new_state & 1),
-                streaming=bool(new_state & 2)
+                recording=(new_state == 2 and self._last_check_recording),
+                streaming=(new_state == 2 and self._last_check_streaming)
             ))
             
-            # Trigger window resize
             if self._window:
                 self._window.update()
 
+    def _plugins_get_notifications_active(self) -> bool:
+        """Check if notifications plugin has active toast."""
+        notif_plugin = self._plugins.get('notifications') if hasattr(self, '_plugins') else None
+        if notif_plugin:
+            return notif_plugin.is_showing()
+        return False
+
     def _start_obs_fade_in(self):
         self._animate_obs_alpha(1.0, 500)
-
-    def _start_obs_fade_out(self):
-        self._animate_obs_alpha(0.0, 500)
 
     def _animate_obs_alpha(self, target: float, duration: int):
         if self._obs_alpha_anim:
@@ -366,14 +434,25 @@ class OBSPlugin(PluginBase):
         self._notif_text_anim.timeout.connect(step)
         self._notif_text_anim.start(step_ms)
 
+    def _anim_to(self, width, height, duration, ease_fn):
+        """Delegate to window's _anim_to."""
+        if self._window:
+            self._window._anim_to(width, height, duration, ease_fn)
+
+    def _collapsed(self):
+        """Get collapsed dimensions from window."""
+        if self._window:
+            return self._window._collapsed
+        return (240, 48)
+
     def get_obs_state(self) -> int:
         return self._obs_state
 
     def is_recording(self) -> bool:
-        return bool(self._obs_state & 1)
+        return self._obs_state == 2 and self._last_check_recording
 
     def is_streaming(self) -> bool:
-        return bool(self._obs_state & 2)
+        return self._obs_state == 2 and self._last_check_streaming
 
     def get_alpha(self) -> float:
         return self._obs_alpha
@@ -389,6 +468,10 @@ class OBSPlugin(PluginBase):
 
     def paint_obs(self, painter: QPainter, rect: QRect, is_expanded: bool):
         """Called from OverlayWindow.paintEvent."""
+        # Store last check results for paint
+        self._last_check_recording = False
+        self._last_check_streaming = False
+        
         # Draw OBS icon in collapsed/expanded pill
         if self._obs_state > 0 and self._obs_alpha > 0 and self._obs_icon:
             painter.save()
@@ -398,8 +481,8 @@ class OBSPlugin(PluginBase):
             icon_x = rect.right() - icon_size - 10
             icon_y = (rect.height() - icon_size) // 2
             
-            # Pulsing animation when recording
-            if self._obs_state & 1:  # Recording
+            # Pulsing animation when recording/streaming
+            if self._obs_state == 2:  # Recording/streaming
                 import math
                 pulse = 1.0 + 0.15 * math.sin(self._window.property("_pulse_time") or 0)
                 scaled = self._obs_icon.scaled(
@@ -456,7 +539,6 @@ class OBSPlugin(PluginBase):
         text_map = {
             1: "OBS Studio started recording",
             2: "OBS Studio started streaming",
-            3: "OBS Studio stopped recording/streaming",
         }
         text = text_map.get(self._notification_type, "")
         text_x = notif_x + 50

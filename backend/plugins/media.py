@@ -1,7 +1,8 @@
 from typing import Dict, Any, Optional
 import threading
 import asyncio
-from PySide6.QtCore import QTimer, QEvent, Qt, QRect
+import time
+from PySide6.QtCore import QTimer, QEvent, Qt, QRect, QCoreApplication
 from PySide6.QtWidgets import QLabel
 from PySide6.QtGui import QPixmap, QPainter, QColor, QFont, QPainterPath, QImage
 
@@ -19,82 +20,126 @@ class MediaResultEvent(QEvent):
         self.result = result  # (title, artist, app_name, status, thumb_bytes, pos, dur, session)
 
 
-# Audio FFT capture (extracted from old overlay)
+# Audio FFT capture (from main branch - WASAPI loopback with frequency band mapping)
 class AudioFFT:
     def __init__(self, num_bands=8):
         self.num_bands = num_bands
         self.bands = [0.0] * num_bands
         self._running = False
         self._thread = None
-
+        
     def start(self):
         if self._running:
             return
         self._running = True
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
-
+        
     def stop(self):
         self._running = False
         if self._thread:
             self._thread.join(timeout=1.0)
-
+            
+    def get_bands(self):
+        return self.bands.copy()
+        
     def _capture_loop(self):
         try:
-            import pyaudiowpatch as pyaudio
-            import numpy as np
-            import comtypes
-            comtypes.CoInitialize()
-            
-            p = pyaudio.PyAudio()
-            # Find WASAPI loopback device
-            device_index = None
-            for i in range(p.get_device_count()):
-                info = p.get_device_info_by_index(i)
-                if 'WASAPI' in info.get('name', '') and info.get('maxInputChannels', 0) > 0:
-                    device_index = i
-                    break
-            
-            if device_index is None:
-                print("[media] No WASAPI loopback device found")
-                return
-
-            stream = p.open(
-                format=pyaudio.paFloat32,
-                channels=2,
-                rate=44100,
-                input=True,
-                input_device_index=device_index,
-                frames_per_buffer=1024,
-            )
-
-            while self._running:
-                data = stream.read(1024, exception_on_overflow=False)
-                audio = np.frombuffer(data, dtype=np.float32)
-                if len(audio) < 1024:
-                    continue
-                # Stereo to mono
-                audio = audio.reshape(-1, 2).mean(axis=1)
-                # FFT
-                fft = np.fft.rfft(audio)
-                mag = np.abs(fft)
-                # Split into bands
-                band_size = len(mag) // self.num_bands
-                for i in range(self.num_bands):
-                    start = i * band_size
-                    end = start + band_size
-                    if end <= len(mag):
-                        self.bands[i] = float(np.mean(mag[start:end]) * 10.0)
-                        # Clamp
-                        if self.bands[i] > 1.0:
-                            self.bands[i] = 1.0
-        except Exception as e:
-            print(f"[media] Audio FFT error: {e}")
-        finally:
+            import pythoncom
+            pythoncom.CoInitialize()
             try:
+                import pyaudiowpatch as pyaudio
+                import numpy as np
+                
+                p = pyaudio.PyAudio()
+                wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
+                default_speakers = p.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
+                
+                if not default_speakers["isLoopbackDevice"]:
+                    for loopback in p.get_loopback_device_info_generator():
+                        if default_speakers["name"] in loopback["name"]:
+                            default_speakers = loopback
+                            break
+                
+                chunk_size = 2048
+                sample_rate = int(default_speakers["defaultSampleRate"])
+                
+                stream = p.open(
+                    format=pyaudio.paInt16,
+                    channels=default_speakers["maxInputChannels"],
+                    rate=sample_rate,
+                    input=True,
+                    input_device_index=default_speakers["index"],
+                    frames_per_buffer=chunk_size
+                )
+                
+                while self._running:
+                    try:
+                        data = stream.read(chunk_size, exception_on_overflow=False)
+                        audio_data = np.frombuffer(data, dtype=np.int16)
+                        
+                        # Convert to mono if stereo
+                        if default_speakers["maxInputChannels"] == 2:
+                            audio_data = audio_data.reshape(-1, 2).mean(axis=1)
+                        
+                        # Apply FFT
+                        fft = np.abs(np.fft.rfft(audio_data))
+                        freqs = np.fft.rfftfreq(chunk_size, 1/sample_rate)
+                        
+                        # Map to frequency bands (bass to treble)
+                        band_ranges = [
+                            (20, 150),      # Sub-bass
+                            (150, 300),     # Bass
+                            (300, 600),     # Low mids
+                            (600, 1200),    # Mids
+                            (1200, 2500),   # Upper mids
+                            (2500, 5000),   # Presence
+                            (5000, 10000),  # Brilliance
+                            (10000, 20000)  # Air
+                        ]
+                        
+                        for i, (low, high) in enumerate(band_ranges[:self.num_bands]):
+                            mask = (freqs >= low) & (freqs < high)
+                            if mask.any():
+                                # Use max for better dynamics, apply log scaling
+                                raw_val = np.max(fft[mask])
+                                self.bands[i] = min(1.0, np.log10(raw_val + 1) / 7.5)
+                            else:
+                                self.bands[i] = 0.0
+                                
+                    except:
+                        time.sleep(0.02)
+                        
                 stream.stop_stream()
                 stream.close()
                 p.terminate()
+            except:
+                # Fallback: use simple peak meter via pycaw
+                try:
+                    from pycaw.pycaw import AudioUtilities, IAudioMeterInformation
+                    while self._running:
+                        try:
+                            sessions = AudioUtilities.GetAllSessions()
+                            max_peak = 0.0
+                            for session in sessions:
+                                if session.Process:
+                                    meter = session._ctl.QueryInterface(IAudioMeterInformation)
+                                    peak = meter.GetPeakValue()
+                                    max_peak = max(max_peak, peak)
+                            
+                            # Simulate bands from peak
+                            for i in range(self.num_bands):
+                                variation = 0.7 + (i * 0.05)
+                                self.bands[i] = min(1.0, max_peak * variation * 2)
+                            
+                            time.sleep(0.05)
+                        except:
+                            time.sleep(0.1)
+                except:
+                    pass
+        finally:
+            try:
+                pythoncom.CoUninitialize()
             except:
                 pass
 
@@ -121,37 +166,40 @@ class MediaPlugin(PluginBase):
         self._window: Optional[OverlayWindow] = None
         
         # Media state
-        self._media_state = 0  # 0=none, 1=playing, 2=paused
+        self._media_state = 0  # 0=none, 1=paused, 2=playing
         self._media_title = ""
         self._media_artist = ""
         self._media_app = ""
         self._media_thumb_bytes = b""
-        self._media_pos = 0.0
-        self._media_dur = 0.0
+        self._media_position = 0.0
+        self._media_duration = 0.0
+        self._pos_display = 0.0
         self._media_session = None
         self._media_loop = None
         self._media_seq = 0
+        self._media_was_active = False
+        self._media_thumb_key = ""
+        self._media_thumb_cache = None
         self._media_thumb_pixmap: Optional[QPixmap] = None
         
         # Visualizer
         self._audio_fft: Optional[AudioFFT] = None
+        self._viz_bars = [0.0] * 8
+        self._audio_levels = [0.0] * 8
         self._viz_timer: Optional[QTimer] = None
         
         # Animation
         self._media_alpha = 0.0
-        self._media_text_alpha = 0.0
+        self._media_text_alpha = 1.0
         self._title_scroll = 0.0
         self._title_scroll_anim: Optional[QTimer] = None
         self._media_alpha_anim: Optional[QTimer] = None
         self._media_text_anim: Optional[QTimer] = None
-        
-        # UI
-        self._title_label: Optional[QLabel] = None
-        self._artist_label: Optional[QLabel] = None
-        self._thumb_label: Optional[QLabel] = None
+        self._media_position_fetch_time = 0.0
         
         # Threading
         self._media_thread: Optional[threading.Thread] = None
+        self._running = False
 
     def on_load(self) -> None:
         pass
@@ -162,6 +210,8 @@ class MediaPlugin(PluginBase):
             print("[media] No window reference")
             return
 
+        self._running = True
+        
         # Setup visualizer
         if self.config.get("show_visualizer", True):
             self._audio_fft = AudioFFT(num_bands=self.config.get("num_bands", 8))
@@ -171,218 +221,242 @@ class MediaPlugin(PluginBase):
             self._viz_timer.timeout.connect(self._update_viz)
             self._viz_timer.start(80)  # ~12.5 FPS
 
-        # Start SMTC monitor thread
+        # Start SMTC monitor thread (main branch implementation)
         self._media_thread = threading.Thread(target=self._media_monitor_thread, daemon=True)
         self._media_thread.start()
 
-        # Subscribe to window state for resize triggers
-        self._unsub_state = self.registry.event_bus.subscribe(
-            WindowStateChanged, self._on_window_state
-        )
-
     def on_disable(self) -> None:
-        if hasattr(self, '_unsub_state'):
-            self._unsub_state()
+        self._running = False
         if self._viz_timer:
             self._viz_timer.stop()
         if self._audio_fft:
             self._audio_fft.stop()
         if self._media_loop:
             self._media_loop.call_soon_threadsafe(self._media_loop.stop)
-        # Cleanup UI
-        for attr in ['_title_label', '_artist_label', '_thumb_label']:
-            widget = getattr(self, attr)
-            if widget:
-                widget.deleteLater()
-                setattr(self, attr, None)
+        if self._media_thread and self._media_thread.is_alive():
+            self._media_thread.join(timeout=1.0)
 
     def on_unload(self) -> None:
         pass
 
-    def _on_window_state(self, event: WindowStateChanged) -> None:
-        if event.state in ("expanded", "hover") and self._media_state > 0:
-            # Trigger resize to expanded layout
-            QTimer.singleShot(0, self._delayed_media_resize)
-
-    def _update_viz(self) -> None:
-        if self._media_state == 0 or not self._audio_fft:
-            return
-        if self._window:
-            self._window.update()  # Trigger repaint for visualizer
-
     def _media_monitor_thread(self):
+        """Main branch SMTC monitor with sessions_changed event + polling."""
         import pythoncom
         pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
+        import asyncio
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         self._media_loop = loop
-        
-        async def run_monitor():
-            try:
-                from winsdk.windows.media.control import (
-                    GlobalSystemMediaTransportControlsSessionManager,
-                    GlobalSystemMediaTransportControlsSessionPlaybackStatus
-                )
-                mgr = await GlobalSystemMediaTransportControlsSessionManager.request_async()
-                
-                # Initial query
-                await self._query_and_post(loop, mgr, is_poll=False)
-                
-                # Poll every 500ms
-                while self._running:
-                    await asyncio.sleep(0.5)
-                    if not self._running:
-                        break
-                    await self._query_and_post(loop, mgr, is_poll=True)
-            except Exception as e:
-                print(f"[media] Monitor error: {e}")
-        
-        loop.run_until_complete(run_monitor())
 
-    async def _query_and_post(self, loop, mgr, is_poll=True):
+        async def init_mgr():
+            from winsdk.windows.media.control import GlobalSystemMediaTransportControlsSessionManager
+            return await GlobalSystemMediaTransportControlsSessionManager.request_async()
+
         try:
-            from winsdk.windows.media.control import (
-                GlobalSystemMediaTransportControlsSessionPlaybackStatus
-            )
-            
-            sessions = []
-            current = mgr.get_current_session()
-            if current:
-                sessions.append(current)
-            
-            # Get all sessions
-            try:
-                all_sessions = mgr.get_sessions()
-                for s in all_sessions:
-                    if s not in sessions:
-                        sessions.append(s)
-            except:
-                pass
+            mgr = loop.run_until_complete(init_mgr())
 
-            for session in sessions:
-                try:
-                    info = await session.try_get_media_properties_async()
-                    playback = session.get_playback_info()
-                    
-                    if playback.playback_status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING:
-                        status = "playing"
-                    elif playback.playback_status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.PAUSED:
-                        status = "paused"
-                    else:
-                        continue  # Skip stopped/closed
-                    
-                    title = str(info.title) if info.title else "Unknown"
-                    artist = str(info.artist) if info.artist else ""
-                    app_name = str(session.source_app_user_model_id) if session.source_app_user_model_id else "Unknown"
-                    
-                    # Thumbnail
-                    thumb_bytes = b""
-                    if info.thumbnail:
-                        try:
-                            thumb_ref = info.thumbnail
-                            stream = await asyncio.wait_for(thumb_ref.open_read_async(), timeout=3.0)
-                            from winsdk.windows.storage.streams import DataReader
-                            reader = DataReader(stream)
-                            size = stream.size
-                            await reader.load_async(size)
-                            thumb_bytes = reader.read_buffer(size)
-                        except:
-                            pass
-                    
-                    # Position
-                    try:
-                        timeline = playback.playback_position
-                        pos_sec = timeline.duration / 10_000_000 if timeline else 0
-                    except:
-                        pos_sec = 0
-                    
-                    try:
-                        dur_sec = info.playback_duration / 10_000_000 if info.playback_duration else 0
-                    except:
-                        dur_sec = 0
-                    
-                    self._media_seq += 1
-                    seq = self._media_seq
-                    
-                    # Post result to main thread
-                    def post_result():
-                        if seq == self._media_seq:  # Still current
-                            QApplication.postEvent(self._window, MediaResultEvent((
-                                title, artist, app_name, status, thumb_bytes, pos_sec, dur_sec, session
-                            )))
-                    
-                    # Run on main thread
-                    import ctypes
-                    ctypes.windll.user32.PostThreadMessageW(
-                        ctypes.windll.kernel32.GetCurrentThreadId(),
-                        0x0400 + 1,  # Custom message
-                        0, 0
-                    )
-                    # Actually use QTimer.singleShot for thread safety
-                    QTimer.singleShot(0, post_result)
-                    
-                    return  # Only report first active session
-                    
-                except Exception as e:
-                    print(f"[media] Session query error: {e}")
-                    continue
-            
-            # No active session
-            if is_poll and self._media_state > 0:
-                QTimer.singleShot(0, lambda: self._on_media_result(("", "", "", "stopped", b"", 0, 0, None)))
-                
+            def sessions_changed(sender, args):
+                asyncio.run_coroutine_threadsafe(self._query_and_post(loop, mgr, False), loop)
+
+            mgr.add_sessions_changed(sessions_changed)
+
+            asyncio.run_coroutine_threadsafe(self._query_and_post(loop, mgr, False), loop)
+
+            def poll():
+                if self._running:
+                    asyncio.run_coroutine_threadsafe(self._query_and_post(loop, mgr, True), loop)
+                    loop.call_later(0.5, poll)
+
+            loop.call_soon(poll)
+            loop.run_forever()
         except Exception as e:
-            print(f"[media] Query error: {e}")
+            print(f"[media] Monitor thread error: {e}")
+
+    async def _read_thumbnail(self, thumbnail_ref):
+        """Read thumbnail from Windows Storage streams."""
+        from winsdk.windows.storage.streams import DataReader
+        try:
+            stream = await asyncio.wait_for(thumbnail_ref.open_read_async(), timeout=3.0)
+            size = int(stream.size)
+            if size <= 0 or size > 5_000_000:
+                return None
+            reader = DataReader(stream)
+            await reader.load_async(size)
+            buf = bytearray(size)
+            reader.read_bytes(buf)
+            return bytes(buf)
+        except Exception:
+            return None
+
+    def _ordered_media_sessions(self, mgr):
+        """Get sessions ordered by playback status (playing first)."""
+        from winsdk.windows.media.control import GlobalSystemMediaTransportControlsSessionPlaybackStatus
+        sessions = []
+        current = mgr.get_current_session()
+        if current:
+            sessions.append(current)
+        for session in mgr.get_sessions():
+            if session is not current:
+                sessions.append(session)
+
+        def sort_key(session):
+            try:
+                status = session.get_playback_info().playback_status
+            except Exception:
+                status = GlobalSystemMediaTransportControlsSessionPlaybackStatus.CLOSED
+            if status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING:
+                return 0
+            if status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.PAUSED:
+                return 1
+            return 2
+
+        sessions.sort(key=sort_key)
+        return sessions
+
+    async def _query_and_post(self, loop, mgr=None, is_poll=True):
+        """Query media sessions and post result to main thread."""
+        _captured_seq = self._media_seq
+        try:
+            from winsdk.windows.media.control import GlobalSystemMediaTransportControlsSessionPlaybackStatus
+            if mgr is None:
+                from winsdk.windows.media.control import GlobalSystemMediaTransportControlsSessionManager
+                mgr = await GlobalSystemMediaTransportControlsSessionManager.request_async()
+            
+            for session in self._ordered_media_sessions(mgr):
+                try:
+                    playback = session.get_playback_info()
+                    status = playback.playback_status
+                    if status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.CLOSED:
+                        continue
+                    info = await session.try_get_media_properties_async()
+                    if not info or not (info.title or info.artist):
+                        continue
+                    title = info.title or ''
+                    artist = info.artist or ''
+                    app_id = session.source_app_user_model_id or ''
+                    thumb_key = f'{title}|{artist}|{app_id}'
+                    thumb_bytes = None
+                    if info.thumbnail:
+                        thumb_bytes = await self._read_thumbnail(info.thumbnail)
+                    if not thumb_bytes and thumb_key == self._media_thumb_key and self._media_thumb_cache:
+                        thumb_bytes = self._media_thumb_cache
+                    
+                    pos_sec = 0.0
+                    dur_sec = 0.0
+                    try:
+                        tl = session.get_timeline_properties()
+                        dur_sec = tl.end_time.total_seconds() if tl.end_time else 0.0
+                        pos_sec = tl.position.total_seconds() if tl.position else 0.0
+                        if dur_sec < 0:
+                            dur_sec = 0.0
+                        if pos_sec < 0:
+                            pos_sec = 0.0
+                    except Exception:
+                        pass
+                    
+                    if self._media_seq != _captured_seq:
+                        return
+                    
+                    self._media_was_active = True
+                    # status.value: 4=PLAYING, 5=PAUSED
+                    result = (title, artist, app_id, status.value, thumb_bytes, pos_sec, dur_sec, session)
+                    QCoreApplication.postEvent(self._window, MediaResultEvent(result))
+                    return
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        
+        if not is_poll:
+            self._media_was_active = False
+            self._media_seq += 1
+            QCoreApplication.postEvent(self._window, MediaResultEvent(('', '', '', 0, None, 0.0, 0.0, None)))
+        elif self._media_was_active:
+            self._media_was_active = False
+            self._media_seq += 1
+            QCoreApplication.postEvent(self._window, MediaResultEvent(('', '', '', 0, None, 0.0, 0.0, None)))
 
     def _on_media_result(self, result) -> None:
-        """Handle media result from background thread."""
+        """Handle media result from background thread (called via event)."""
         if not self._window:
             return
             
         title, artist, app_name, status, thumb_bytes, pos_sec, dur_sec, session = result
-        
+
         new_state = 0
-        if status == "playing":
-            new_state = 1
-        elif status == "paused":
-            new_state = 2
-        
-        changed = (
-            new_state != self._media_state or
-            title != self._media_title or
-            artist != self._media_artist or
-            app_name != self._media_app
+        if status == 4:
+            new_state = 2  # PLAYING
+        elif status == 5:
+            new_state = 1  # PAUSED
+
+        prev_state = self._media_state
+        text_changed = (title != self._media_title or artist != self._media_artist)
+        meta_changed = (
+            pos_sec != self._media_position
+            or dur_sec != self._media_duration
+            or thumb_bytes is not None
         )
+
+        need_resize = new_state != prev_state or text_changed
         
+        # Fade out when media stops
+        if prev_state > 0 and new_state == 0:
+            self._animate_media_alpha(0.0, 300)
+        # Fade in when media starts
+        elif prev_state == 0 and new_state > 0:
+            self._animate_media_alpha(1.0, 300)
+
         self._media_state = new_state
-        self._media_title = title
-        self._media_artist = artist
-        self._media_app = app_name
-        self._media_pos = pos_sec
-        self._media_dur = dur_sec
+        if new_state > 0 or prev_state == 0:
+            self._media_title = title
+            self._media_artist = artist
+            self._media_app = app_name
         self._media_session = session
+        self._media_duration = dur_sec
         
-        if thumb_bytes and thumb_bytes != self._media_thumb_bytes:
-            self._media_thumb_bytes = thumb_bytes
+        # Only update position if it actually changed or state changed
+        if abs(pos_sec - self._media_position) > 0.5 or prev_state != new_state or prev_state == 0:
+            self._media_position = pos_sec
+            self._pos_display = pos_sec
+            # Reset to current time to restart interpolation from this position
+            self._media_position_fetch_time = time.time() if new_state == 2 else 0.0
+        
+        thumb_key = f'{title}|{artist}|{app_name}'
+        if thumb_bytes:
+            self._media_thumb_key = thumb_key
+            self._media_thumb_cache = thumb_bytes
             self._load_thumbnail(thumb_bytes)
+        elif new_state == 0 and prev_state == 0:
+            self._media_thumb_key = ''
+            self._media_thumb_cache = None
+            self._media_thumb_pixmap = None
+        elif thumb_key != self._media_thumb_key:
+            self._media_thumb_pixmap = None
+
+        if text_changed and new_state > 0:
+            self._media_text_alpha = 0.0
+            self._animate_media_text_alpha(1.0, 300)
+            self._start_title_scroll()
+        else:
+            self._media_text_alpha = 1.0
+
+        if need_resize:
+            if new_state > 0 and prev_state == 0:
+                self._media_alpha = 0.0
+                self._animate_media_alpha(1.0, 300)
+                
+                if not self._window.property("_hidden_by_fullscreen") and self._window.isVisible():
+                    # Window will handle resize via event
+                    pass
+            elif new_state == 0 and prev_state > 0:
+                self._animate_media_alpha(0.0, 300)
+                self._delayed_media_resize()
+            elif self._window.property("_is_expanded"):
+                pass  # Window handles resize
         
-        if changed:
-            # Animate in/out
-            if new_state > 0:
-                self._start_media_fade_in()
-            else:
-                self._start_media_fade_out()
-            
-            # Publish event for other plugins
-            self.registry.event_bus.publish(MediaSessionChanged(
-                playing=(new_state == 1),
-                title=title,
-                artist=artist,
-                album_art=self._media_thumb_bytes
-            ))
-        
-        if self._window:
-            self._window.update()
+        if need_resize or meta_changed:
+            if self._window:
+                self._window.update()
 
     def _load_thumbnail(self, thumb_bytes: bytes):
         if not thumb_bytes:
@@ -397,22 +471,9 @@ class MediaPlugin(PluginBase):
         except:
             self._media_thumb_pixmap = None
 
-    def _start_media_fade_in(self):
-        # Simple alpha animation using timer
-        self._media_alpha = 0.0
-        self._media_text_alpha = 0.0
-        self._animate_media_alpha(1.0, 300)
-        self._animate_media_text_alpha(1.0, 300)
-        self._start_title_scroll()
-
-    def _start_media_fade_out(self):
-        self._animate_media_alpha(0.0, 300)
-        self._animate_media_text_alpha(0.0, 300)
-
     def _animate_media_alpha(self, target: float, duration: int):
         if self._media_alpha_anim:
             self._media_alpha_anim.stop()
-        self._media_alpha_anim = QTimer(self._window)
         steps = 30
         step_val = (target - self._media_alpha) / steps
         step_ms = duration // steps
@@ -428,13 +489,13 @@ class MediaPlugin(PluginBase):
                 self._media_alpha = target
                 self._media_alpha_anim.stop()
         
+        self._media_alpha_anim = QTimer(self._window)
         self._media_alpha_anim.timeout.connect(step)
         self._media_alpha_anim.start(step_ms)
 
     def _animate_media_text_alpha(self, target: float, duration: int):
         if self._media_text_anim:
             self._media_text_anim.stop()
-        self._media_text_alpha = 0.0
         steps = 30
         step_val = (target - self._media_text_alpha) / steps
         step_ms = duration // steps
@@ -450,6 +511,7 @@ class MediaPlugin(PluginBase):
                 self._media_text_alpha = target
                 self._media_text_anim.stop()
         
+        self._media_text_anim = QTimer(self._window)
         self._media_text_anim.timeout.connect(step)
         self._media_text_anim.start(step_ms)
 
@@ -457,15 +519,32 @@ class MediaPlugin(PluginBase):
         if self._title_scroll_anim:
             self._title_scroll_anim.stop()
         self._title_scroll = 0.0
-        # Scroll over 12 seconds
         self._title_scroll_anim = QTimer(self._window)
         self._title_scroll_anim.timeout.connect(lambda: self._window.update() if self._window else None)
-        self._title_scroll_anim.start(16)  # 60 FPS for smooth scroll
+        self._title_scroll_anim.start(16)  # 60 FPS
+
+    def _update_viz(self):
+        if self._media_state == 0:
+            return
+        
+        # Get real-time FFT bands
+        if self._audio_fft:
+            self._audio_levels = self._audio_fft.get_bands()
+        
+        changed = False
+        for i in range(min(8, len(self._audio_levels))):
+            speed = 0.25
+            target = self._audio_levels[i] if self._media_state == 2 else 0.1
+            diff = target - self._viz_bars[i]
+            if abs(diff) > 0.005:
+                self._viz_bars[i] += diff * speed
+                changed = True
+        if changed and self._media_state > 0 and self._window:
+            self._window.update()
 
     def _delayed_media_resize(self):
-        if self._window and not self._window.property("_hidden_by_fullscreen"):
-            # Window will handle its own resize based on media state
-            pass
+        # Window handles resize via event
+        pass
 
     def get_media_state(self) -> int:
         return self._media_state
@@ -476,15 +555,14 @@ class MediaPlugin(PluginBase):
             "title": self._media_title,
             "artist": self._media_artist,
             "app": self._media_app,
-            "position": self._media_pos,
-            "duration": self._media_dur,
+            "position": self._media_position,
+            "duration": self._media_duration,
+            "pos_display": self._pos_display,
             "thumb_pixmap": self._media_thumb_pixmap,
         }
 
     def get_visualizer_bands(self) -> list:
-        if self._audio_fft:
-            return self._audio_fft.bands[:]
-        return [0.0] * self.config.get("num_bands", 8)
+        return self._viz_bars[:]
 
     def get_alpha(self) -> float:
         return self._media_alpha
@@ -496,9 +574,19 @@ class MediaPlugin(PluginBase):
         return self._title_scroll
 
     def do_action(self, action: str, seek_seconds: Optional[float] = None):
-        """Play/pause/next/prev/seek."""
+        """Play/pause/next/prev/seek with optimistic UI update."""
         if not self._media_session or not self._media_loop:
             return
+        
+        # Instant optimistic update
+        if action == "play":
+            self._media_state = 2
+            if self._window:
+                self._window.update()
+        elif action == "pause":
+            self._media_state = 1
+            if self._window:
+                self._window.update()
         
         async def do_async():
             try:
@@ -510,10 +598,6 @@ class MediaPlugin(PluginBase):
                     await self._media_session.try_skip_next_async()
                 elif action == "prev":
                     await self._media_session.try_skip_previous_async()
-                elif action == "seek" and seek_seconds is not None:
-                    from winsdk.windows.foundation import TimeSpan
-                    ts = TimeSpan(int(seek_seconds * 10_000_000))
-                    await self._media_session.try_change_playback_position_async(ts)
             except Exception as e:
                 print(f"[media] Action error: {e}")
         
@@ -562,7 +646,7 @@ class MediaPlugin(PluginBase):
                 painter.drawText(text_x, text_y, title_text)
             
             # Playback status
-            status_text = "Now Playing" if self._media_state == 1 else "Paused"
+            status_text = "Now Playing" if self._media_state == 2 else "Paused"
             painter.setPen(QColor(180, 180, 180, 200))
             font.setPointSize(8)
             painter.setFont(font)
@@ -570,7 +654,7 @@ class MediaPlugin(PluginBase):
         
         # Visualizer bars
         if self.config.get("show_visualizer", True) and self._audio_fft:
-            bands = self._audio_fft.bands
+            bands = self._viz_bars
             bar_w = 4
             gap = 2
             total_w = len(bands) * (bar_w + gap) - gap
@@ -598,25 +682,22 @@ class MediaPlugin(PluginBase):
         start_x = (rect.width() - total_w) // 2
         y = rect.bottom() - btn_size - 8
         
-        icons = ["⏮", "⏪", "⏸" if self._media_state == 1 else "▶", "⏩", "⏭"]
+        icons = ["⏮", "⏪", "⏸" if self._media_state == 2 else "▶", "⏩", "⏭"]
         actions = ["prev", "rewind", "play_pause", "forward", "next"]
         
         for i, (icon, action) in enumerate(zip(icons, actions)):
             x = start_x + i * (btn_size + spacing)
             btn_rect = QRect(x, y, btn_size, btn_size)
             
-            # Highlight hover (simplified - would need mouse tracking)
             painter.setPen(QColor(255, 255, 255, 100))
             painter.setBrush(QColor(255, 255, 255, 30))
             painter.drawRoundedRect(btn_rect, 14, 14)
             
-            # Icon
             font = QFont("Segoe UI Emoji", 14)
             painter.setFont(font)
             painter.setPen(QColor(255, 255, 255, 220))
             painter.drawText(btn_rect, Qt.AlignmentFlag.AlignCenter, icon)
             
-            # Store rect for hit testing
             if not hasattr(self, '_control_rects'):
                 self._control_rects = []
             while len(self._control_rects) <= i:

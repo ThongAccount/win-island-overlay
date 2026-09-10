@@ -7,15 +7,17 @@ VENVDIR = ROOT / ".venv"
 LOGS = ROOT / "logs"
 LOGS.mkdir(exist_ok=True)
 
-# Window configuration
+# Window configuration (matches main branch constants)
 WINDOW_CONFIG = {
-    'margin_top': 8,
-    'micro_width': 240,
-    'expanded_width': 480,
-    'height': 48,
+    'margin_top': 8.0,
+    'micro_width': 240.0,
+    'expanded_width': 480.0,
+    'height': 48.0,
     'expand_duration': 500,
-    'obs_extra_width': 40,
-    'media_extra_width': 100,
+    'collapse_duration': 500,
+    'hover_delay': 200,
+    'obs_extra_width': 40.0,
+    'media_extra_width': 100.0,
 }
 
 # Plugin configuration
@@ -58,5 +60,13 @@ PLUGIN_CONFIG = {
         'auto_switch': True,
         'notify_on_switch': True,
         'default_profile': 'default',
+    },
+    'weather': {
+        'enabled': True,
+        'api_key': '',  # OpenWeatherMap API key
+        'location': '',  # Empty = auto-detect
+        'update_interval_ms': 1800000,  # 30 minutes
+        'duration_ms': 6000,
+        'show_on_startup': False,
     },
 }
