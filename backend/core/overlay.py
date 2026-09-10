@@ -1357,8 +1357,4 @@ class OverlayWindow(QWidget):
         return super().property(name)
 
     def get_state(self) -> str:
-        return self._state if hasattr(self, '_state') else ('expanded' if self._is_expanded else 'collapsed')
-
-    @property
-    def _state(self):
         return 'expanded' if self._is_expanded else 'collapsed'
