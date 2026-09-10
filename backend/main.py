@@ -5,10 +5,10 @@ from pathlib import Path
 from PySide6.QtCore import QTimer, QFileSystemWatcher
 from PySide6.QtWidgets import QApplication
 
-from backend.core.overlay import OverlayWindow
-from backend.core.plugin import PluginRegistry
-from backend.core.events import EventBus
-from backend.plugins import discover_plugins
+from core.overlay import OverlayWindow
+from core.plugin import PluginRegistry
+from core.events import EventBus
+from plugins import discover_plugins
 
 
 def load_config() -> dict:
@@ -28,11 +28,15 @@ def load_config() -> dict:
     config_path = Path(__file__).parent / "config.py"
     if config_path.exists():
         try:
-            spec = __import__('config', fromlist=['*'])
-            if hasattr(spec, 'PLUGIN_CONFIG'):
-                config['plugins'].update(spec.PLUGIN_CONFIG)
-            if hasattr(spec, 'WINDOW_CONFIG'):
-                config['window'].update(spec.WINDOW_CONFIG)
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("backend.config", config_path)
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules["backend.config"] = mod
+            spec.loader.exec_module(mod)
+            if hasattr(mod, 'PLUGIN_CONFIG'):
+                config['plugins'].update(mod.PLUGIN_CONFIG)
+            if hasattr(mod, 'WINDOW_CONFIG'):
+                config['window'].update(mod.WINDOW_CONFIG)
         except Exception as e:
             print(f"[config] Failed to load config.py: {e}")
 
