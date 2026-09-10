@@ -5,10 +5,10 @@ from pathlib import Path
 from PySide6.QtCore import QTimer, QFileSystemWatcher
 from PySide6.QtWidgets import QApplication
 
-from core.overlay import OverlayWindow
-from core.plugin import PluginRegistry
-from core.events import EventBus
-from plugins import discover_plugins
+from .core.overlay import OverlayWindow
+from .core.plugin import PluginRegistry
+from .core.events import EventBus
+from .plugins import discover_plugins
 
 
 def load_config() -> dict:
