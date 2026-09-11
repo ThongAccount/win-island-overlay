@@ -391,6 +391,13 @@ class OverlayWindow(QWidget):
         self._toast_timer.setSingleShot(True)
         self._toast_timer.timeout.connect(self._dismiss_toast)
 
+        # Weather animation (main branch)
+        self._weather_alpha_anim = QVariantAnimation(self)
+        self._weather_alpha_anim.valueChanged.connect(lambda v: setattr(self, '_weather_alpha', v) or self.update())
+        self._weather_timer = QTimer(self)
+        self._weather_timer.setSingleShot(True)
+        self._weather_timer.timeout.connect(self._dismiss_weather)
+
     def _setup_hover_delay(self):
         self._hover_timer = QTimer(self)
         self._hover_timer.setSingleShot(True)
@@ -1163,34 +1170,213 @@ class OverlayWindow(QWidget):
         if media_plugin:
             media_plugin._on_media_result(result)
 
-    def _dismiss_toast(self):
-        self._toast_active = False
+    def _on_toast(self, data):
+        self._toast_app = data['app'] or 'Unknown app'
+        self._toast_title = data['title']
+        self._toast_body = data['body']
+        self._toast_time = data['time']
+        self._toast_buttons = data['buttons']
+        self._toast_aumid = data.get('aumid')
+        self._toast_notif_id = data.get('notif_id')
+        self._toast_icon = QPixmap()
+        if data['icon']:
+            self._toast_icon.loadFromData(data['icon'])
+        
+        # Load image preview
+        self._toast_image = QPixmap()
+        if data.get('image'):
+            img_path = data['image']
+            # Handle file:// URIs
+            if img_path.startswith('file:///'):
+                img_path = img_path[8:]
+            elif img_path.startswith('ms-appx://') or img_path.startswith('ms-appdata://'):
+                # Skip app package resources for now
+                pass
+            else:
+                self._toast_image.load(img_path)
+
+        self._toast_active = True
         self._toast_alpha = 0.0
-        self._toast_buttons = []
-        self._toast_pressed_btn = -1
-        self._toast_hovered_btn = -1
         self._toast_hovered = False
-        self.update()
+        
+        # Stop any ongoing animations and force expanded state
+        self._is_expanded = True
+        self._expand_progress = 1.0
+        self._hover_pending = False
+        self._hover_timer.stop()
+        self._anim.stop()
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+
+        # Calculate dynamic height based on body text
+        body_font = QFont('Segoe UI', 8)
+        fm = QFontMetrics(body_font)
+        w, _ = self._expanded
+        text_width = int(w - 12 - 36 - 10 - 12)  # margins + icon + spacing
+        body_rect = fm.boundingRect(0, 0, text_width, 1000, Qt.TextFlag.TextWordWrap, self._toast_body)
+        
+        # Base height: 72, add extra for wrapped text beyond 1 line
+        base_content_h = 42  # app + title + 1 line body
+        extra_h = max(0, body_rect.height() - 14)
+        toast_h = 72 + extra_h
+        
+        # If hidden (fullscreen dodge), show temporarily without resetting _hidden_by_fullscreen
+        was_hidden = not self.isVisible()
+        if was_hidden:
+            screen = QApplication.primaryScreen().geometry()
+            start_w = int(w * 0.50)
+            x_start = (screen.width() - start_w) / 2.0
+            self.setGeometry(int(x_start), -toast_h, start_w, int(toast_h))
+            self.show()
+            self._anim_to(w, toast_h, 500, _outback_ease)
+        else:
+            self._anim_to(w, toast_h, OBS_ANIM_DURATION, _ease_inquad_outback)
+
+        # Fade in during second half of expand animation
+        QTimer.singleShot(int(OBS_ANIM_DURATION * 0.5), self._start_toast_fade_in)
+
+        # Auto-dismiss: 30s if buttons, 5s otherwise
+        duration = TOAST_DURATION_WITH_BUTTONS if self._toast_buttons else TOAST_DURATION
+        self._toast_timer.stop()
+        self._toast_timer.start(duration)
+
+    def _start_toast_fade_in(self):
+        if not self._toast_active:
+            return
+        self._toast_alpha_anim.stop()
+        self._toast_alpha_anim.setDuration(int(OBS_ANIM_DURATION * 0.5))
+        self._toast_alpha_anim.setStartValue(self._toast_alpha)
+        self._toast_alpha_anim.setEndValue(1.0)
+        self._toast_alpha_anim.start()
+
+    def _dismiss_toast(self):
+        if not self._toast_active:
+            return
+        
+        self._toast_active = False
+        self._toast_hovered_btn = -1
+        self._toast_pressed_btn = -1
+        self._toast_hovered = False
+        self._toast_buttons = []
+        self._toast_alpha = 0.0
+        
+        # Fade out
+        self._toast_alpha_anim.stop()
+        self._toast_alpha_anim.setDuration(250)
+        self._toast_alpha_anim.setStartValue(self._toast_alpha)
+        self._toast_alpha_anim.setEndValue(0.0)
+        self._toast_alpha_anim.start()
+
+        # If no media, collapse
+        if self._media_state == 0:
+            self._is_expanded = False
+            self._expand_progress = 0.0
+            self._anim_to(self._collapsed[0], self._collapsed[1], COLLAPSE_DURATION, _ease_incubic_outback)
+
+    def _on_weather(self, data):
+        """Display weather notification."""
+        if self._weather_dismissed:
+            return  # User already saw it
+        
+        self._weather_temp = data['temp']
+        self._weather_condition = data['condition']
+        self._weather_location = data['location']
+        self._weather_feels_like = data['feels_like']
+        self._weather_humidity = data['humidity']
+        self._weather_wind = data['wind']
+        self._weather_aqi = data['aqi']
+        self._weather_aqi_level = data['aqi_level']
+        self._weather_icon = data['icon']
+        
+        self._weather_active = True
+        self._weather_alpha = 0.0
+        self._weather_hovered = False
+        
+        # OVERRIDE: Force visible state and full expansion
+        self._hidden_by_fullscreen = False
+        self._is_hiding = False
+        self._is_expanded = True
+        self._expand_progress = 1.0
+        self._hover_pending = False
+        self._hover_timer.stop()
+        self._anim.stop()
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        
+        # Expand to show weather
+        weather_w, _ = self._expanded
+        weather_h = 90  # Taller to fit all weather info
+        screen = QApplication.primaryScreen().geometry()
+        x = int((screen.width() - weather_w) / 2.0)
+        
+        # If hidden, show from off-screen like toasts
+        if not self.isVisible():
+            start_w = int(weather_w * 0.50)
+            x_start = (screen.width() - start_w) / 2.0
+            self.setGeometry(int(x_start), -weather_h, start_w, int(weather_h))
+            self.show()
+            self._anim_to(weather_w, weather_h, 500, _ease_incubic_outback)
+        else:
+            self._anim_to(weather_w, weather_h, EXPAND_DURATION, _ease_incubic_outback, y_pos=None)
+        
+        # Fade in
+        self._weather_alpha_anim.stop()
+        self._weather_alpha_anim.setDuration(300)
+        self._weather_alpha_anim.setStartValue(0.0)
+        self._weather_alpha_anim.setEndValue(1.0)
+        self._weather_alpha_anim.start()
+        
+        # Auto-dismiss after 15 seconds
+        self._weather_timer.start(15000)
 
     def _dismiss_weather(self):
-        self._weather_alpha = 0.0
+        """Dismiss weather notification."""
+        if not self._weather_active:
+            return
+        
         self._weather_active = False
-        self.update()
+        self._weather_dismissed = True  # Mark as seen
+        self._weather_timer.stop()
+        
+        # Fade out weather (in all cases)
+        self._weather_alpha_anim.stop()
+        self._weather_alpha_anim.setDuration(250)
+        self._weather_alpha_anim.setStartValue(self._weather_alpha)
+        self._weather_alpha_anim.setEndValue(0.0)
+        self._weather_alpha_anim.start()
 
+        # Collapse back; if media is playing, show media pill after fade-out
+        if self._media_state == 0:
+            self._is_expanded = False
+            self._expand_progress = 0.0
     def _do_media_action(self, action, seek_seconds=None):
-        """Delegate to media plugin."""
-        media_plugin = self._plugins.get('media')
-        if media_plugin:
-            media_plugin.do_action(action, seek_seconds)
-
-    def _btn_at(self, pos):
-        layout = self._media_expanded_layout()
-        for i, rect in enumerate(layout['btn_rects']):
-            if rect.contains(pos):
-                return i
-        return -1
-
-    def _toast_btn_at(self, pos):
+        session = self._media_session
+        loop = self._media_loop
+        if not session or not loop:
+            return
+        
+        # Instant optimistic update
+        if action == 'play':
+            self._media_state = 2
+            self.update()
+        elif action == 'pause':
+            self._media_state = 1
+            self.update()
+        
+        import asyncio
+        
+        async def do_action():
+            try:
+                if action == 'play':
+                    await session.try_play_async()
+                elif action == 'pause':
+                    await session.try_pause_async()
+                elif action == 'next':
+                    await session.try_skip_next_async()
+                elif action == 'prev':
+                    await session.try_skip_previous_async()
+            except:
+                pass
+        
+        asyncio.run_coroutine_threadsafe(do_action(), loop)
         if not self._toast_buttons or not self._toast_active:
             return -1
         rect = self.rect()
