@@ -190,13 +190,13 @@ class MediaPlugin(PluginBase):
 
         self._running = True
         
-        # Setup visualizer
+        # Setup visualizer — drive overlay paint state
         if self.config.get("show_visualizer", True):
             self._audio_fft = AudioFFT(num_bands=self.config.get("num_bands", 8))
             self._audio_fft.start()
-            
+
             self._viz_timer = QTimer(self._window)
-            self._viz_timer.timeout.connect(self._update_viz)
+            self._viz_timer.timeout.connect(self._window._update_viz)
             self._viz_timer.start(80)  # ~12.5 FPS
 
         # Start SMTC monitor thread (main branch implementation)
@@ -225,6 +225,8 @@ class MediaPlugin(PluginBase):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         self._media_loop = loop
+        if self._window:
+            self._window._media_loop = loop
 
         async def init_mgr():
             from winsdk.windows.media.control import GlobalSystemMediaTransportControlsSessionManager

@@ -275,53 +275,35 @@ class OBSPlugin(PluginBase):
             return {'recording': False, 'streaming': False}
 
     def _on_obs_result(self, new_state: int, recording: bool, streaming: bool):
-        """Handle OBS check result on main thread."""
+        """Handle OBS check result on main thread — overlay owns animations."""
         if not self._window:
             return
-            
+
         old_state = self._obs_state
-        if new_state != old_state:
-            self._obs_state = new_state
+        if new_state == old_state:
+            return
+
+        self._obs_state = new_state
+        if new_state > 0:
+            self._obs_draw_state = new_state
+
+        # Drive overlay shell/paint state (main-branch motions)
+        if self.config.get("show_notifications", True):
+            self._window.apply_obs_state(new_state)
+        else:
+            self._window._obs_state = new_state
             if new_state > 0:
-                self._obs_draw_state = new_state
-            
-            self._obs_fade_timer.stop()
-            if self._obs_alpha_anim:
-                self._obs_alpha_anim.stop()
-            if self._notif_timer:
-                self._notif_timer.stop()
-            
-            # Show notification for state changes
-            if self.config.get("show_notifications", True):
-                if old_state == 1 and new_state == 2:
-                    self._show_notification(1)  # Recording started
-                elif old_state == 2 and new_state == 1:
-                    self._show_notification(2)  # Streaming started
-                elif (self._window.property("_hidden_by_fullscreen") or not self._window.isVisible()):
-                    # If hidden and no toast, just update state without animation
-                    self._obs_alpha = 1.0 if new_state > 0 else 0.0
-                    if new_state == 0:
-                        self._obs_draw_state = 0
-                    self._notification_active = False
-                    if self._window:
-                        self._window.update()
-                else:
-                    if new_state > 0:
-                        self._obs_fade_timer.start(500 - int(500 * 0.50))
-                        self._window._anim_to(*self._window._collapsed, 500, _ease_incubic_outback)
-                    else:
-                        self._notification_active = False
-                        self._animate_obs_alpha(0.0, int(500 * 0.50))
-                        self._window._anim_to(*self._window._collapsed, 500, _ease_incubic_outback)
-            
-            # Publish event
-            self.registry.event_bus.publish(OBSStateChanged(
-                recording=recording,
-                streaming=streaming
-            ))
-            
-            if self._window:
-                self._window.update()
+                self._window._obs_draw_state = new_state
+                self._window._obs_alpha = 1.0
+            else:
+                self._window._obs_alpha = 0.0
+                self._window._obs_draw_state = 0
+            self._window.update()
+
+        self.registry.event_bus.publish(OBSStateChanged(
+            recording=recording,
+            streaming=streaming
+        ))
 
     def _start_obs_fade_in(self):
         self._animate_obs_alpha(1.0, 500)

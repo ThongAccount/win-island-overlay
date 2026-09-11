@@ -66,7 +66,7 @@ PLUGIN_CONFIG = {
         'api_key': '',  # OpenWeatherMap API key
         'location': '',  # Empty = auto-detect
         'update_interval_ms': 1800000,  # 30 minutes
-        'duration_ms': 6000,
-        'show_on_startup': False,
+        'duration_ms': 15000,
+        'show_on_startup': True,
     },
 }

@@ -1,7 +1,6 @@
 from typing import Dict, Any, Optional, List
 import threading
-import pythoncom
-from PySide6.QtCore import QTimer, QEvent, Qt, QRect
+from PySide6.QtCore import QTimer, QEvent, Qt, QRect, QCoreApplication
 from PySide6.QtGui import QPainter, QColor, QFont, QPixmap, QImage
 from PySide6.QtWidgets import QLabel
 
@@ -85,6 +84,7 @@ class NotificationsPlugin(PluginBase):
     def _listener_thread_func(self):
         """Background thread for Windows toast notifications."""
         try:
+            import pythoncom
             pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
             
             # Import Windows Runtime
@@ -191,33 +191,66 @@ class NotificationsPlugin(PluginBase):
                 "notification_id": str(notification.id),
             }
             
-            # Post to main thread
+            # Post to overlay (main-thread) with main-branch payload shape
+            import datetime
+            time_str = 'just now'
+            try:
+                ct = notification.timestamp
+                now = datetime.datetime.now(datetime.timezone.utc)
+                if hasattr(ct, 'astimezone'):
+                    diff = int((now - ct).total_seconds())
+                    if diff < 60:
+                        time_str = 'just now'
+                    elif diff < 3600:
+                        time_str = f'{diff // 60}m ago'
+                    else:
+                        time_str = ct.astimezone().strftime('%H:%M')
+            except Exception:
+                pass
+
+            aumid = None
+            try:
+                if notification.app_info:
+                    aumid = notification.app_info.id
+            except Exception:
+                pass
+
+            overlay_payload = {
+                'app': app_name,
+                'title': title,
+                'body': body,
+                'time': time_str,
+                'icon': icon_bytes or None,
+                'buttons': [b.get('label', '') for b in buttons] if buttons else [],
+                'image': None,
+                'aumid': aumid,
+                'notif_id': str(notification.id),
+            }
+            if self._window:
+                QCoreApplication.postEvent(self._window, ToastNotifEvent(overlay_payload))
+
+            # Keep plugin queue for bookkeeping / event bus
             QTimer.singleShot(0, lambda: self._on_toast(data))
             
         except Exception as e:
             print(f"[notifications] Process error: {e}")
 
     def _on_toast(self, data: Dict[str, Any]):
-        """Handle incoming toast on main thread."""
+        """Bookkeeping / event bus — overlay owns display via ToastNotifEvent."""
         if not self._window:
             return
-        
-        # Add to queue
+
         self._toasts.insert(0, data)
         max_toasts = self.config.get("max_toasts", 5)
         if len(self._toasts) > max_toasts:
             self._toasts = self._toasts[:max_toasts]
-        
-        # Show latest
-        self._show_latest_toast()
-        
-        # Publish event
+
         self.registry.event_bus.publish(NotificationReceived(
             app_name=data["app"],
             title=data["title"],
             body=data["body"],
             icon_bytes=data["icon_bytes"],
-            buttons=[b["label"] for b in data["buttons"]]
+            buttons=[b["label"] for b in data["buttons"]] if data.get("buttons") else []
         ))
 
     def _show_latest_toast(self):

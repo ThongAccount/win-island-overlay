@@ -5,4 +5,4 @@ pycaw>=20240210; sys_platform == "win32"
 comtypes>=1.2.0; sys_platform == "win32"
 numpy>=1.24.0
 pyaudiowpatch>=0.2.12.5; sys_platform == "win32"
-cairosvg>=2.7.1
+requests>=2.28.0

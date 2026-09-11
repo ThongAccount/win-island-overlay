@@ -1,5 +1,5 @@
 from typing import Dict, Any, Optional, List, Tuple
-from PySide6.QtCore import Qt, QTimer, QRect, QRectF, QEasingCurve, QPropertyAnimation, QVariantAnimation, QEvent
+from PySide6.QtCore import Qt, QTimer, QRect, QRectF, QPoint, QEasingCurve, QPropertyAnimation, QVariantAnimation, QEvent
 from PySide6.QtWidgets import QWidget, QApplication
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QFont, QCursor, QPen, QBrush, QRadialGradient
 from PySide6.QtGui import QPixmap, QFontMetrics
@@ -93,7 +93,7 @@ NOTIFICATION_DURATION = 4000
 NOTIFICATION_SIZE = (420, 72)
 TOAST_DURATION = 5000
 TOAST_DURATION_WITH_BUTTONS = 30000
-WEATHER_DURATION = 6000
+WEATHER_DURATION = 15000
 
 RECORDING_TEXT = "OBS Studio is currently recording your screen and audio"
 STOPPED_TEXT = "OBS Studio has stopped recording your screen and audio"
@@ -504,17 +504,94 @@ class OverlayWindow(QWidget):
             self._run_obs_fade(1.0, int(OBS_ANIM_DURATION * 0.50))
 
     def _show_notification(self, notif_type):
-        # Delegated to OBS plugin
-        obs_plugin = self._plugins.get('obs')
-        if obs_plugin:
-            obs_plugin._show_notification(notif_type)
+        """OBS recording/streaming notification — main branch behavior."""
+        self._notification_active = True
+        self._notification_type = notif_type
+
+        # OVERRIDE: Force visible state and full expansion
+        self._hidden_by_fullscreen = False
+        self._is_hiding = False
+        self._is_expanded = True
+        self._expand_progress = 1.0
+        self._hover_pending = False
+        self._hover_timer.stop()
+        self._hovered_btn = -1
+        self._pressed_btn = -1
+        self._notif_timer.stop()
+
+        if not self.isVisible():
+            w, h = self._expanded
+            screen = QApplication.primaryScreen().geometry()
+            x = int((screen.width() - w) / 2.0)
+            self.setGeometry(x, int(MARGIN_TOP), int(w), int(h))
+            self.show()
+
+        w, h = self._expanded
+        self._anim_to(w, h, EXPAND_DURATION, _ease_inquad_outback)
+        self._notif_timer.start(NOTIFICATION_DURATION)
+        self._notif_progress_anim.stop()
+        self._notif_progress_anim.setDuration(EXPAND_DURATION)
+        self._notif_progress_anim.setStartValue(self._notif_icon_progress)
+        self._notif_progress_anim.setEndValue(1.0)
+        self._notif_progress_anim.start()
+        self._notif_text_timer.stop()
+        self._notif_text_anim.stop()
+        self._notif_text_timer.start(OBS_ANIM_DURATION - int(OBS_ANIM_DURATION * 0.50))
 
     def _dismiss_notification(self):
-        self._notification_active = False
+        """Collapse OBS notification — main branch behavior."""
+        if self._is_expanded:
+            return
         self._notification_type = 0
-        self._notif_icon_progress = 0.0
-        if not self._is_expanded:
-            self._dismiss_toast()
+        self._hover_pending = False
+        self._hover_timer.stop()
+        self._notif_timer.stop()
+        w, h = self._collapsed
+        self._anim_to(w, h, COLLAPSE_DURATION, _ease_inquad_outback)
+        self._notif_progress_anim.stop()
+        self._notif_progress_anim.setDuration(COLLAPSE_DURATION)
+        self._notif_progress_anim.setStartValue(self._notif_icon_progress)
+        self._notif_progress_anim.setEndValue(0.0)
+        self._notif_progress_anim.start()
+        self._notif_text_timer.stop()
+        self._notif_text_anim.stop()
+        self._notif_text_anim.setDuration(int(OBS_ANIM_DURATION * 0.50))
+        self._notif_text_anim.setStartValue(self._notif_text_alpha)
+        self._notif_text_anim.setEndValue(0.0)
+        self._notif_text_anim.start()
+
+    def apply_obs_state(self, new_state: int):
+        """Apply OBS idle/recording state with main-branch animations."""
+        old_state = self._obs_state
+        if new_state == old_state:
+            return
+        self._obs_state = new_state
+        if new_state > 0:
+            self._obs_draw_state = new_state
+
+        self._obs_fade_timer.stop()
+        self._obs_alpha_anim.stop()
+        self._notif_timer.stop()
+
+        if old_state == 1 and new_state == 2:
+            self._show_notification(1)
+        elif old_state == 2 and new_state == 1:
+            self._show_notification(2)
+        elif (self._hidden_by_fullscreen or not self.isVisible()) and not self._toast_active:
+            self._obs_alpha = 1.0 if new_state > 0 else 0.0
+            if new_state == 0:
+                self._obs_draw_state = 0
+            self._notification_active = False
+            self._reset_collapsed()
+        else:
+            if new_state > 0:
+                self._obs_fade_timer.start(OBS_ANIM_DURATION - int(OBS_ANIM_DURATION * 0.50))
+                self._anim_to(self._collapsed[0], self._collapsed[1], OBS_ANIM_DURATION, _ease_incubic_outback)
+            else:
+                self._notification_active = False
+                self._run_obs_fade(0.0, int(OBS_ANIM_DURATION * 0.50))
+                self._anim_to(self._collapsed[0], self._collapsed[1], OBS_ANIM_DURATION, _ease_incubic_outback)
+        self.update()
 
     def _on_notif_progress_step(self, v):
         self._notif_icon_progress = v
@@ -723,7 +800,7 @@ class OverlayWindow(QWidget):
                     self._is_hiding = True
                     self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
                     w, h = self._collapsed
-                    self._anim_to(int(w * 0.50), h, 175, _ease_incubic_outback, y_pos=-h)
+                    self._anim_to(int(w * 0.50), h, 175, _incubic_ease, y_pos=-h)
         else:
             if self._hidden_by_fullscreen:
                 self._hidden_by_fullscreen = False
@@ -766,8 +843,9 @@ class OverlayWindow(QWidget):
             self._paint_toast(painter, rect)
         elif self._weather_active or self._weather_alpha > 0.01:
             self._paint_weather(painter, rect)
-        
-        self._paint_main_content(painter, rect)
+        else:
+            # Media / idle OBS / easter egg — only when no overlay notification
+            self._paint_main_content(painter, rect)
 
     def _paint_notification(self, painter, rect):
         """Paint OBS notification (main branch exact)."""
@@ -1160,15 +1238,144 @@ class OverlayWindow(QWidget):
             'viz_cy': viz_cy,
             'progress_rect': progress_rect,
             'progress_hit_rect': progress_rect.adjusted(0, -10, 0, 8),
+            'obs_dot_x': obs_dot_x,
+            'obs_dot_y': obs_dot_y,
+            'island_cy': island_cy,
         }
 
-    # --- Media handlers ---
+    # --- Media handlers (main branch) ---
     def _on_media_result(self, result):
-        """Handle media result from SMTC plugin (called via event)."""
-        # Publish to media plugin
+        """Handle media result from SMTC plugin (via MediaResultEvent)."""
+        title, artist, app_name, status, thumb_bytes, pos_sec, dur_sec, session = result
+
+        new_state = 0
+        if status == 4:
+            new_state = 2
+        elif status == 5:
+            new_state = 1
+
+        prev_state = self._media_state
+        text_changed = (title != self._media_title or artist != self._media_artist)
+        meta_changed = (
+            pos_sec != self._media_position
+            or dur_sec != self._media_duration
+            or thumb_bytes is not None
+        )
+
+        need_resize = new_state != prev_state or text_changed
+
+        # Fade out when media stops
+        if prev_state > 0 and new_state == 0:
+            self._media_alpha_anim.stop()
+            self._media_alpha_anim.setDuration(int(OBS_ANIM_DURATION * 0.50))
+            self._media_alpha_anim.setStartValue(self._media_alpha)
+            self._media_alpha_anim.setEndValue(0.0)
+            self._media_alpha_anim.start()
+        # Fade in when media starts
+        elif prev_state == 0 and new_state > 0:
+            self._media_alpha_anim.stop()
+            self._media_alpha_anim.setDuration(300)
+            self._media_alpha_anim.setStartValue(0.0)
+            self._media_alpha_anim.setEndValue(1.0)
+            self._media_alpha_anim.start()
+
+        self._media_state = new_state
+        if new_state > 0 or prev_state == 0:
+            self._media_title = title
+            self._media_artist = artist
+            self._media_app = app_name
+        self._media_session = session
+        self._media_duration = dur_sec
+
+        # Keep loop ref in sync from media plugin
         media_plugin = self._plugins.get('media')
-        if media_plugin:
-            media_plugin._on_media_result(result)
+        if media_plugin and getattr(media_plugin, '_media_loop', None):
+            self._media_loop = media_plugin._media_loop
+
+        if abs(pos_sec - self._media_position) > 0.5 or prev_state != new_state or prev_state == 0:
+            self._media_position = pos_sec
+            self._pos_display = pos_sec
+            self._media_position_fetch_time = time.time() if new_state == 2 else 0.0
+        thumb_key = f'{title}|{artist}|{app_name}'
+        if thumb_bytes:
+            self._media_thumb_key = thumb_key
+            self._media_thumb_cache = thumb_bytes
+            self._media_thumb.loadFromData(thumb_bytes)
+        elif new_state == 0 and prev_state == 0:
+            self._media_thumb_key = ''
+            self._media_thumb_cache = None
+            self._media_thumb = QPixmap()
+        elif thumb_key != self._media_thumb_key:
+            self._media_thumb = QPixmap()
+
+        if text_changed and new_state > 0:
+            self._media_text_alpha = 0.0
+            self._media_text_anim.stop()
+            self._media_text_anim.setDuration(300)
+            self._media_text_anim.setStartValue(0.0)
+            self._media_text_anim.setEndValue(1.0)
+            self._media_text_anim.start()
+            self._title_scroll_anim.stop()
+            self._title_scroll = 0.0
+            self._start_title_scroll()
+        else:
+            self._media_text_alpha = 1.0
+
+        if need_resize:
+            # Skip media resize if weather is active (weather takes priority)
+            if self._weather_active:
+                return
+
+            if new_state > 0 and prev_state == 0:
+                self._media_alpha = 0.0
+                self._media_alpha_anim.stop()
+                self._media_alpha_anim.setDuration(int(OBS_ANIM_DURATION * 0.50))
+                self._media_alpha_anim.setStartValue(0.0)
+                self._media_alpha_anim.setEndValue(1.0)
+                self._media_alpha_anim.start()
+
+                if not self._hidden_by_fullscreen and self.isVisible():
+                    self._anim_to(self._collapsed[0], self._collapsed[1], OBS_ANIM_DURATION, _ease_incubic_outback)
+                else:
+                    self._media_alpha = 1.0
+                    self._reset_collapsed()
+            elif new_state == 0 and prev_state > 0:
+                self._media_alpha_anim.stop()
+                self._media_alpha_anim.setDuration(int(OBS_ANIM_DURATION * 0.50))
+                self._media_alpha_anim.setStartValue(1.0)
+                self._media_alpha_anim.setEndValue(0.0)
+                self._media_alpha_anim.start()
+                self._delayed_media_resize()
+            elif self._is_expanded:
+                self._anim_to(self._expanded[0], self._expanded[1], EXPAND_DURATION, _outback_ease)
+        if need_resize or meta_changed:
+            self.update()
+
+    def _update_viz(self):
+        if self._media_state == 0:
+            return
+
+        media_plugin = self._plugins.get('media')
+        if media_plugin and getattr(media_plugin, '_audio_fft', None):
+            self._audio_levels = media_plugin._audio_fft.get_bands()
+
+        changed = False
+        for i in range(8):
+            speed = 0.25
+            target = self._audio_levels[i] if self._media_state == 2 else 0.1
+            diff = target - self._viz_bars[i]
+            if abs(diff) > 0.005:
+                self._viz_bars[i] += diff * speed
+                changed = True
+        if changed and self._media_state > 0:
+            self.update()
+
+    def _delayed_media_resize(self):
+        if not self._hidden_by_fullscreen and self.isVisible():
+            self._anim_to(self._collapsed[0], self._collapsed[1], OBS_ANIM_DURATION, _ease_incubic_outback)
+        else:
+            self._media_alpha = 0.0
+            self._reset_collapsed()
 
     def _on_toast(self, data):
         self._toast_app = data['app'] or 'Unknown app'
@@ -1179,18 +1386,15 @@ class OverlayWindow(QWidget):
         self._toast_aumid = data.get('aumid')
         self._toast_notif_id = data.get('notif_id')
         self._toast_icon = QPixmap()
-        if data['icon']:
+        if data.get('icon'):
             self._toast_icon.loadFromData(data['icon'])
-        
-        # Load image preview
+
         self._toast_image = QPixmap()
         if data.get('image'):
             img_path = data['image']
-            # Handle file:// URIs
             if img_path.startswith('file:///'):
                 img_path = img_path[8:]
             elif img_path.startswith('ms-appx://') or img_path.startswith('ms-appdata://'):
-                # Skip app package resources for now
                 pass
             else:
                 self._toast_image.load(img_path)
@@ -1198,8 +1402,7 @@ class OverlayWindow(QWidget):
         self._toast_active = True
         self._toast_alpha = 0.0
         self._toast_hovered = False
-        
-        # Stop any ongoing animations and force expanded state
+
         self._is_expanded = True
         self._expand_progress = 1.0
         self._hover_pending = False
@@ -1207,19 +1410,15 @@ class OverlayWindow(QWidget):
         self._anim.stop()
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
 
-        # Calculate dynamic height based on body text
         body_font = QFont('Segoe UI', 8)
         fm = QFontMetrics(body_font)
         w, _ = self._expanded
-        text_width = int(w - 12 - 36 - 10 - 12)  # margins + icon + spacing
+        text_width = int(w - 12 - 36 - 10 - 12)
         body_rect = fm.boundingRect(0, 0, text_width, 1000, Qt.TextFlag.TextWordWrap, self._toast_body)
-        
-        # Base height: 72, add extra for wrapped text beyond 1 line
-        base_content_h = 42  # app + title + 1 line body
+
         extra_h = max(0, body_rect.height() - 14)
         toast_h = 72 + extra_h
-        
-        # If hidden (fullscreen dodge), show temporarily without resetting _hidden_by_fullscreen
+
         was_hidden = not self.isVisible()
         if was_hidden:
             screen = QApplication.primaryScreen().geometry()
@@ -1231,10 +1430,8 @@ class OverlayWindow(QWidget):
         else:
             self._anim_to(w, toast_h, OBS_ANIM_DURATION, _ease_inquad_outback)
 
-        # Fade in during second half of expand animation
         QTimer.singleShot(int(OBS_ANIM_DURATION * 0.5), self._start_toast_fade_in)
 
-        # Auto-dismiss: 30s if buttons, 5s otherwise
         duration = TOAST_DURATION_WITH_BUTTONS if self._toast_buttons else TOAST_DURATION
         self._toast_timer.stop()
         self._toast_timer.start(duration)
@@ -1251,32 +1448,40 @@ class OverlayWindow(QWidget):
     def _dismiss_toast(self):
         if not self._toast_active:
             return
-        
+
         self._toast_active = False
         self._toast_hovered_btn = -1
         self._toast_pressed_btn = -1
         self._toast_hovered = False
-        self._toast_buttons = []
-        self._toast_alpha = 0.0
-        
-        # Fade out
+        self._toast_timer.stop()
+
+        # Fade out alpha (capture current before clearing)
+        start_alpha = self._toast_alpha
         self._toast_alpha_anim.stop()
         self._toast_alpha_anim.setDuration(250)
-        self._toast_alpha_anim.setStartValue(self._toast_alpha)
+        self._toast_alpha_anim.setStartValue(start_alpha)
         self._toast_alpha_anim.setEndValue(0.0)
         self._toast_alpha_anim.start()
 
-        # If no media, collapse
-        if self._media_state == 0:
-            self._is_expanded = False
-            self._expand_progress = 0.0
+        self._is_expanded = False
+        self._expand_progress = 0.0
+
+        if self._hidden_by_fullscreen:
+            self._is_hiding = True
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            w, h = self._collapsed
+            self._anim_to(int(w * 0.50), h, 200, _incubic_ease, -h)
+        else:
             self._anim_to(self._collapsed[0], self._collapsed[1], COLLAPSE_DURATION, _ease_incubic_outback)
+
+        if self._hidden_by_fullscreen:
+            QTimer.singleShot(COLLAPSE_DURATION, self._rehide_toast)
 
     def _on_weather(self, data):
         """Display weather notification."""
         if self._weather_dismissed:
-            return  # User already saw it
-        
+            return
+
         self._weather_temp = data['temp']
         self._weather_condition = data['condition']
         self._weather_location = data['location']
@@ -1286,12 +1491,11 @@ class OverlayWindow(QWidget):
         self._weather_aqi = data['aqi']
         self._weather_aqi_level = data['aqi_level']
         self._weather_icon = data['icon']
-        
+
         self._weather_active = True
         self._weather_alpha = 0.0
         self._weather_hovered = False
-        
-        # OVERRIDE: Force visible state and full expansion
+
         self._hidden_by_fullscreen = False
         self._is_hiding = False
         self._is_expanded = True
@@ -1300,14 +1504,11 @@ class OverlayWindow(QWidget):
         self._hover_timer.stop()
         self._anim.stop()
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
-        
-        # Expand to show weather
+
         weather_w, _ = self._expanded
-        weather_h = 90  # Taller to fit all weather info
+        weather_h = 90
         screen = QApplication.primaryScreen().geometry()
-        x = int((screen.width() - weather_w) / 2.0)
-        
-        # If hidden, show from off-screen like toasts
+
         if not self.isVisible():
             start_w = int(weather_w * 0.50)
             x_start = (screen.width() - start_w) / 2.0
@@ -1316,53 +1517,69 @@ class OverlayWindow(QWidget):
             self._anim_to(weather_w, weather_h, 500, _ease_incubic_outback)
         else:
             self._anim_to(weather_w, weather_h, EXPAND_DURATION, _ease_incubic_outback, y_pos=None)
-        
-        # Fade in
+
         self._weather_alpha_anim.stop()
         self._weather_alpha_anim.setDuration(300)
         self._weather_alpha_anim.setStartValue(0.0)
         self._weather_alpha_anim.setEndValue(1.0)
         self._weather_alpha_anim.start()
-        
-        # Auto-dismiss after 15 seconds
-        self._weather_timer.start(15000)
+
+        duration = WEATHER_DURATION
+        weather_plugin = self._plugins.get('weather')
+        if weather_plugin:
+            duration = int(weather_plugin.config.get('duration_ms', WEATHER_DURATION))
+        self._weather_timer.start(duration)
 
     def _dismiss_weather(self):
         """Dismiss weather notification."""
         if not self._weather_active:
             return
-        
+
         self._weather_active = False
-        self._weather_dismissed = True  # Mark as seen
+        self._weather_dismissed = True
         self._weather_timer.stop()
-        
-        # Fade out weather (in all cases)
+
         self._weather_alpha_anim.stop()
         self._weather_alpha_anim.setDuration(250)
         self._weather_alpha_anim.setStartValue(self._weather_alpha)
         self._weather_alpha_anim.setEndValue(0.0)
         self._weather_alpha_anim.start()
 
-        # Collapse back; if media is playing, show media pill after fade-out
         if self._media_state == 0:
             self._is_expanded = False
             self._expand_progress = 0.0
+            self._anim_to(self._collapsed[0], self._collapsed[1], COLLAPSE_DURATION, _ease_incubic_outback)
+        else:
+            self._is_expanded = False
+            self._hover_animating = True
+            self._expand_progress = 1.0
+            self._anim_to(self._collapsed[0], self._collapsed[1], COLLAPSE_DURATION, _ease_incubic_outback)
+
     def _do_media_action(self, action, seek_seconds=None):
         session = self._media_session
         loop = self._media_loop
         if not session or not loop:
+            media_plugin = self._plugins.get('media')
+            if media_plugin:
+                media_plugin.do_action(action, seek_seconds)
+                # Optimistic UI on overlay
+                if action == 'play':
+                    self._media_state = 2
+                    self.update()
+                elif action == 'pause':
+                    self._media_state = 1
+                    self.update()
             return
-        
-        # Instant optimistic update
+
         if action == 'play':
             self._media_state = 2
             self.update()
         elif action == 'pause':
             self._media_state = 1
             self.update()
-        
+
         import asyncio
-        
+
         async def do_action():
             try:
                 if action == 'play':
@@ -1373,20 +1590,31 @@ class OverlayWindow(QWidget):
                     await session.try_skip_next_async()
                 elif action == 'prev':
                     await session.try_skip_previous_async()
-            except:
+            except Exception:
                 pass
-        
+
         asyncio.run_coroutine_threadsafe(do_action(), loop)
+
+    def _btn_at(self, pos):
+        layout = self._media_expanded_layout()
+        for i, rect in enumerate(layout['btn_rects']):
+            if rect.contains(pos):
+                return i
+        return -1
+
+    def _toast_btn_at(self, pos):
         if not self._toast_buttons or not self._toast_active:
             return -1
         rect = self.rect()
-        btn_count = len(self._toast_buttons)
-        btn_w = min(80, (rect.width() - 100) // btn_count)
+        ix = 12
+        icon_size = 36
+        tx = ix + icon_size + 10
+        tw = rect.width() - tx - 12
         btn_y = rect.height() - 22
-        for i in range(btn_count):
-            bx = rect.width() // 2 - (btn_count * (btn_w + 6)) // 2 + i * (btn_w + 6)
-            br = QRect(bx, btn_y, btn_w, 18)
-            if br.contains(pos):
+        btn_w = min(80, (tw - (len(self._toast_buttons) - 1) * 6) // len(self._toast_buttons))
+        for i in range(len(self._toast_buttons)):
+            bx = tx + i * (btn_w + 6)
+            if QRect(bx, btn_y, btn_w, 18).contains(pos):
                 return i
         return -1
 
@@ -1394,13 +1622,16 @@ class OverlayWindow(QWidget):
         try:
             import subprocess
             subprocess.Popen(['explorer.exe', f'shell:AppsFolder\\{aumid}'], shell=True)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Failed to launch app: {e}")
 
     def _rehide_toast(self):
         if not self._hidden_by_fullscreen or self._toast_active:
             return
         self._is_hiding = True
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        w, h = self._collapsed
+        self._anim_to(int(w * 0.75), h, OBS_ANIM_DURATION, _ease_incubic_outback, -h)
 
     # --- Mouse events (main branch exact) ---
     def mousePressEvent(self, event):

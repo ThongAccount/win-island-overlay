@@ -1,7 +1,7 @@
 from typing import Dict, Any, Optional
 import threading
 import time
-from PySide6.QtCore import QTimer, QEvent, Qt
+from PySide6.QtCore import QTimer, QEvent, Qt, QCoreApplication
 from PySide6.QtWidgets import QLabel
 
 from backend.core.plugin import PluginBase, island_plugin, PluginRegistry
@@ -20,8 +20,8 @@ from backend.core.overlay import OverlayWindow, WeatherEvent
         "api_key": "",  # OpenWeatherMap API key
         "location": "",  # Empty = auto-detect
         "update_interval_ms": 1800000,  # 30 minutes
-        "duration_ms": 6000,
-        "show_on_startup": False,
+        "duration_ms": 15000,
+        "show_on_startup": True,
     },
     enabled_by_default=True,
 )
@@ -138,7 +138,10 @@ class WeatherPlugin(PluginBase):
                     'icon': icon
                 }
             
-            QTimer.singleShot(0, lambda: self._on_weather(data))
+            if self._window:
+                QCoreApplication.postEvent(self._window, WeatherEvent(data))
+            else:
+                QTimer.singleShot(0, lambda: self._on_weather(data))
             
         except Exception as e:
             print(f"[weather] Fetch error: {e}")
@@ -179,28 +182,15 @@ class WeatherPlugin(PluginBase):
             return {'aqi': 0, 'level': 'Unknown'}
 
     def _on_weather(self, data: Dict[str, Any]):
-        """Handle weather data on main thread."""
+        """Fallback bookkeeping if event post unavailable — prefer WeatherEvent."""
         if not self._window:
             return
-        
         self._weather_data = data
-        self._weather_dismissed = False
-        
-        # Show notification
-        self._weather_active = True
-        self._weather_alpha = 0.0
-        self._weather_icon_progress = 0.0
-        self._weather_text_alpha = 0.0
-        self._weather_hovered = False
-        
-        self._animate_weather_icon(1.0, 300)
-        self._animate_weather_text(1.0, 300)
-        
-        duration = self.config.get("duration_ms", 6000)
-        QTimer.singleShot(duration, self._dismiss_weather)
-        
-        if self._window:
-            self._window.update()
+        # Overlay owns display; only post if somehow not already displayed
+        if not self._window._weather_active:
+            from backend.core.overlay import WeatherEvent
+            from PySide6.QtCore import QCoreApplication
+            QCoreApplication.postEvent(self._window, WeatherEvent(data))
 
     def _dismiss_weather(self):
         if self._window and self._window.property("_is_expanded"):

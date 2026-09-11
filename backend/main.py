@@ -58,16 +58,19 @@ def main():
     config = load_config()
     registry = PluginRegistry(event_bus, config)
 
-    # Discover and load plugins
+    # Discover and load plugins (do not enable yet — need window ref first)
     discover_plugins(registry)
     registry.load_all()
+
+    # Create overlay before enabling plugins so on_enable can bind to it
+    overlay = OverlayWindow(registry, config)
+    registry.config['_window_ref'] = overlay
+
+    # Now enable plugins (monitors/listeners start with a valid window)
     registry.enable_all()
 
-    # Create overlay window
-    overlay = OverlayWindow(registry, config)
-
     # Register plugins with overlay for paint/event integration
-    for name in ['obs', 'media', 'notifications', 'greeting', 'activity']:
+    for name in ['obs', 'media', 'notifications', 'weather', 'greeting', 'activity']:
         plugin = registry.get(name)
         if plugin:
             overlay.register_plugin(name, plugin)
