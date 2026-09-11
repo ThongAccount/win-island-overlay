@@ -1,5 +1,6 @@
 from typing import Dict, Any, Optional, List, Tuple
 from PySide6.QtCore import Qt, QTimer, QRect, QRectF, QPoint, QEasingCurve, QPropertyAnimation, QVariantAnimation, QEvent
+from PySide6.QtCore import QPointF, QElapsedTimer
 from PySide6.QtWidgets import QWidget, QApplication
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QFont, QCursor, QPen, QBrush, QRadialGradient
 from PySide6.QtGui import QPixmap, QFontMetrics
@@ -379,6 +380,21 @@ class OverlayWindow(QWidget):
 
         self._split_anim = QVariantAnimation(self)
         self._split_anim.valueChanged.connect(self._on_split_step)
+
+        # Sideswiper page state
+        self._page = 0                     # current page index into _active_pages()
+        self._page_anim_target = 0
+        self._page_anim_sign = 0.0
+        self._page_hold = False            # press-and-hold armed
+        self._page_dragging = False        # actively swiping
+        self._page_drag_off = 0.0          # live drag offset in px (neg = toward next)
+        self._page_flip_anim = QVariantAnimation(self)
+        self._page_flip_anim.valueChanged.connect(self._on_page_flip_step)
+        self._page_flip_anim.finished.connect(self._on_page_flip_finished)
+        self._press_pos = QPointF()
+        self._hold_timer = QTimer(self)
+        self._hold_timer.setSingleShot(True)
+        self._hold_timer.timeout.connect(self._on_hold_armed)
 
         self._toast_alpha_anim = QVariantAnimation(self)
         self._toast_alpha_anim.valueChanged.connect(lambda v: setattr(self, '_toast_alpha', v) or self.update())
@@ -988,199 +1004,246 @@ class OverlayWindow(QWidget):
         painter.restore()
 
     def _paint_main_content(self, painter, rect):
-        """Paint OBS, media, toast, weather content - main branch exact."""
-        # OBS recording/streaming status in pill
-        if self._obs_draw_state > 0:
-            if self._media_state > 0 and self._is_expanded:
-                painter.setOpacity(self._obs_alpha)
-                painter.drawPixmap(14, rect.center().y() - 9, 18, 18, self._obs_pixmap)
-                painter.setOpacity(1.0)
-            else:
-                painter.setOpacity(self._obs_alpha)
-                painter.drawPixmap(16, rect.center().y() - 9, 18, 18, self._obs_pixmap)
-                painter.setOpacity(1.0)
+        """Paint the active page stack (sideswiper)."""
+        pages = self._active_pages()
+        if not pages:
+            return
 
-        if self._obs_draw_state > 0 and (not self._media_state or self._expand_progress < 0.5):
-            painter.setOpacity(self._obs_alpha)
-            dot_size = 10 if self._obs_draw_state == 2 else 8
-            dot_x = rect.right() - 24
-            dot_y = rect.center().y() - dot_size // 2
-            gradient = QRadialGradient(dot_x + dot_size / 2, dot_y + dot_size / 2, dot_size / 2)
-            if self._obs_draw_state == 2:
-                gradient.setColorAt(0.0, QColor(140, 255, 140, 240))
-                gradient.setColorAt(1.0, QColor(30, 150, 30, 240))
-            else:
-                gradient.setColorAt(0.0, QColor(255, 240, 100, 240))
-                gradient.setColorAt(1.0, QColor(200, 150, 20, 240))
-            painter.setBrush(QBrush(gradient))
+        # Swipe offset: during drag, swipe_off is the live pixel offset
+        # (negative = dragging toward next page); 0 = paint current page.
+        off = self._page_drag_off
+
+        painter.save()
+        painter.setClipRect(rect)
+
+        if off != 0.0:
+            # Two pages visible during drag
+            n = len(pages)
+            i = self._page
+            cur = pages[i % n]
+            nxt = pages[(i + 1) % n] if off < 0 else pages[(i - 1) % n]
+            t = max(-1.0, min(1.0, off / rect.width()))
+            painter.translate(off, 0)
+            cur(painter, rect)
+            painter.translate(-off * 2, 0)
+            nxt(painter, rect)
+        else:
+            pages[self._page % len(pages)](painter, rect)
+
+        painter.restore()
+
+        # Page dots (only when >1 page and expanded)
+        if len(pages) > 1 and self._expand_progress > 0.5:
+            n = len(pages)
+            dot_y = rect.height() - 8
+            dot_gap = 10
+            total_w = (n - 1) * dot_gap
+            start_x = (rect.width() - total_w) / 2.0
             painter.setPen(Qt.NoPen)
-            painter.drawEllipse(dot_x, dot_y, dot_size, dot_size)
-        elif self._expand_progress > 0.5 and self._obs_draw_state == 0:
-            fade = (self._expand_progress - 0.5) * 2
+            for k in range(n):
+                active = (k == self._page % n)
+                c = QColor(220, 220, 255, 230 if active else 90)
+                painter.setBrush(c)
+                r = 2.5 if active else 2.0
+                painter.drawEllipse(QPointF(start_x + k * dot_gap, dot_y), r, r)
+
+    # --- Page stack (sideswiper) ---
+    def _active_pages(self):
+        """Ordered page painters; default order = plugin load order.
+
+        Order: media (always exists as a slot), obs. Extend here as new
+        content pages land (weather-as-page, greeter, etc.).
+        """
+        pages = []
+        if self._media_state > 0 or self._media_alpha > 0.01:
+            pages.append(self._paint_media)
+        if self._obs_draw_state > 0:
+            pages.append(self._paint_obs_page)
+        return pages
+
+    def _paint_obs_page(self, painter, rect):
+        """OBS status as its own swipeable page."""
+        painter.setOpacity(self._obs_alpha)
+        cy = rect.center().y()
+        painter.drawPixmap(16, int(cy - 9), 18, 18, self._obs_pixmap)
+        painter.setFont(QFont('Segoe UI', 9))
+        painter.setPen(QColor(200, 200, 230, 230))
+        if self._obs_draw_state == 2:
+            text = 'Streaming / Recording'
+        else:
+            text = 'OBS running'
+        painter.drawText(QRect(44, 0, rect.width() - 60, rect.height()),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
+        dot_size = 10 if self._obs_draw_state == 2 else 8
+        dot_x = rect.right() - 24
+        dot_y = int(cy - dot_size // 2)
+        gradient = QRadialGradient(dot_x + dot_size / 2, dot_y + dot_size / 2, dot_size / 2)
+        if self._obs_draw_state == 2:
+            gradient.setColorAt(0.0, QColor(140, 255, 140, 240))
+            gradient.setColorAt(1.0, QColor(30, 150, 30, 240))
+        else:
+            gradient.setColorAt(0.0, QColor(255, 240, 100, 240))
+            gradient.setColorAt(1.0, QColor(200, 150, 20, 240))
+        painter.setBrush(QBrush(gradient))
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(dot_x, dot_y, dot_size, dot_size)
+        painter.setOpacity(1.0)
+
+    def _paint_media(self, painter, rect):
+        cy = rect.center().y()
+        b = self._expand_progress
+        painter.setOpacity(1.0)
+
+        collapsed_thumb_x = 16
+
+        layout = self._media_expanded_layout()
+        text_x = layout['text_x']
+        text_w = layout['text_w']
+        text_top = layout['text_top']
+        btn_rects = layout['btn_rects']
+        thumb_rect = layout['thumb_rect']
+        viz_left = layout['viz_left']
+
+        painter.setOpacity(self._media_alpha)
+
+        # Blended thumbnail
+        ts = 14 + (24 - 14) * b
+        thumb_x = collapsed_thumb_x + (thumb_rect.x() - collapsed_thumb_x) * b
+        thumb_y = cy - ts / 2
+
+        if not self._media_thumb.isNull():
+            painter.drawPixmap(int(thumb_x), int(thumb_y), int(ts), int(ts), self._media_thumb)
+        else:
+            thumb_font = int(9 + (13 - 9) * b)
+            painter.setFont(QFont('Segoe UI', thumb_font))
+            painter.setPen(QColor(150, 150, 220, 240))
+            painter.drawText(QRect(int(thumb_x), int(thumb_y), int(ts), int(ts)), Qt.AlignmentFlag.AlignCenter, '♪')
+
+        # Blended title
+        collapsed_title_x = int(collapsed_thumb_x + 14 + 5)
+        title_x = collapsed_title_x + (text_x - collapsed_title_x) * b
+        title_font = 8 + (10 - 8) * b
+        if b < 0.5:
+            title_w = int(rect.width() - title_x - 52)
+        else:
+            title_w = int(text_w)
+        painter.setFont(QFont('Segoe UI', int(title_font), QFont.Weight.Bold))
+        painter.setPen(QColor(230, 230, 250, 240))
+        title_y = int(cy - 8 - 4 * b)
+        if b > 0.3:
+            title_y += 3
+        title_rect = QRect(int(title_x), title_y, int(title_w), 16)
+        fm = QFontMetrics(painter.font())
+        full_w = fm.horizontalAdvance(self._media_title)
+        if full_w > title_w:
+            max_s = full_w - title_w + 30
+            s = self._title_scroll
+            if s < 1.0:
+                off = -max_s * s
+            else:
+                off = -max_s * (2.0 - s)
+            painter.save()
+            painter.setClipRect(title_rect)
+            painter.drawText(int(title_x + off), title_y, int(full_w + 50), 16,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._media_title)
+            painter.restore()
+        else:
+            painter.drawText(title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._media_title)
+
+        # Visualizer
+        bw2, gap2 = 2, 1
+        viz_h = 6 + (10 - 6) * b
+        viz_x_collapsed = rect.right() - 40
+        viz_x = viz_x_collapsed + (viz_left - viz_x_collapsed) * b
+        painter.setPen(Qt.NoPen)
+        for i in range(8):
+            h2 = max(1, int(viz_h * self._viz_bars[i]))
+            painter.setBrush(QColor(100, 180 + i * 10, 255, 200))
+            painter.drawRoundedRect(int(viz_x + i * (bw2 + gap2)), int(cy - h2), bw2, h2 * 2, 2, 2)
+
+        painter.setOpacity(1.0)
+
+        # Expanded-only elements
+        if b > 0.3:
+            fade = min(1.0, (b - 0.3) / 0.5) * self._media_alpha
+
+            app_name = self._media_app.replace('.exe', '').capitalize() if self._media_app else ''
             painter.setOpacity(fade)
-            painter.setFont(QFont('Segoe UI', 11))
+            app_font_size = 7 + int(b * 1.5)
+            painter.setFont(QFont('Segoe UI', app_font_size))
             painter.setPen(QColor(150, 150, 200, 220))
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Nothing to see here!")
-            painter.setOpacity(1.0)
+            painter.drawText(text_x, text_top + 5, app_name)
 
-        # Media rendering
-        if (self._media_state > 0 or self._media_alpha > 0.01) and not self._notification_active and not self._toast_active and self._toast_alpha <= 0.01 and not self._weather_active and self._weather_alpha <= 0.01:
-            cy = rect.center().y()
-            b = self._expand_progress
-            painter.setOpacity(1.0)
-
-            collapsed_thumb_x = 16
-            if self._obs_draw_state > 0:
-                collapsed_thumb_x += 24
-
-            layout = self._media_expanded_layout()
-            text_x = layout['text_x']
-            text_w = layout['text_w']
-            text_top = layout['text_top']
-            btn_rects = layout['btn_rects']
-            thumb_rect = layout['thumb_rect']
-            viz_left = layout['viz_left']
-
-            painter.setOpacity(self._media_alpha)
-
-            # Blended thumbnail
-            ts = 14 + (24 - 14) * b
-            thumb_x = collapsed_thumb_x + (thumb_rect.x() - collapsed_thumb_x) * b
-            thumb_y = cy - ts / 2
-
-            if not self._media_thumb.isNull():
-                painter.drawPixmap(int(thumb_x), int(thumb_y), int(ts), int(ts), self._media_thumb)
-            else:
-                thumb_font = int(9 + (13 - 9) * b)
-                painter.setFont(QFont('Segoe UI', thumb_font))
-                painter.setPen(QColor(150, 150, 220, 240))
-                painter.drawText(QRect(int(thumb_x), int(thumb_y), int(ts), int(ts)), Qt.AlignmentFlag.AlignCenter, '♪')
-
-            # Blended title
-            collapsed_title_x = int(collapsed_thumb_x + 14 + 5)
-            title_x = collapsed_title_x + (text_x - collapsed_title_x) * b
-            title_font = 8 + (10 - 8) * b
-            if b < 0.5:
-                title_w = int(rect.width() - title_x - 52)
-            else:
-                title_w = int(text_w)
-            painter.setFont(QFont('Segoe UI', int(title_font), QFont.Weight.Bold))
-            painter.setPen(QColor(230, 230, 250, 240))
-            title_y = int(cy - 8 - 4 * b)
-            if b > 0.3:
-                title_y += 3
-            title_rect = QRect(int(title_x), title_y, int(title_w), 16)
-            fm = QFontMetrics(painter.font())
-            full_w = fm.horizontalAdvance(self._media_title)
-            if full_w > title_w:
-                max_s = full_w - title_w + 30
+            art_rect = QRect(text_x, text_top + 29, text_w, 14)
+            artist_font_size = 7 + int(b * 1.5)
+            painter.setFont(QFont('Segoe UI', artist_font_size))
+            painter.setPen(QColor(180, 180, 220, 230))
+            art_fm = QFontMetrics(painter.font())
+            art_full = art_fm.horizontalAdvance(self._media_artist)
+            if art_full > text_w:
+                art_max_s = art_full - text_w + 20
                 s = self._title_scroll
                 if s < 1.0:
-                    off = -max_s * s
+                    art_off = -art_max_s * s
                 else:
-                    off = -max_s * (2.0 - s)
+                    art_off = -art_max_s * (2.0 - s)
                 painter.save()
-                painter.setClipRect(title_rect)
-                painter.drawText(int(title_x + off), title_y, int(full_w + 50), 16,
-                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._media_title)
+                painter.setClipRect(art_rect)
+                painter.drawText(int(text_x + art_off), text_top + 26, int(art_full + 30), 14,
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._media_artist)
                 painter.restore()
             else:
-                painter.drawText(title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._media_title)
+                painter.drawText(art_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._media_artist)
 
-            # Visualizer
-            bw2, gap2 = 2, 1
-            viz_h = 6 + (10 - 6) * b
-            viz_x_collapsed = rect.right() - 40
-            viz_x = viz_x_collapsed + (viz_left - viz_x_collapsed) * b
-            painter.setPen(Qt.NoPen)
-            for i in range(8):
-                h2 = max(1, int(viz_h * self._viz_bars[i]))
-                painter.setBrush(QColor(100, 180 + i * 10, 255, 200))
-                painter.drawRoundedRect(int(viz_x + i * (bw2 + gap2)), int(cy - h2), bw2, h2 * 2, 2, 2)
-
-            painter.setOpacity(1.0)
-
-            # Expanded-only elements
-            if b > 0.3:
-                fade = min(1.0, (b - 0.3) / 0.5) * self._media_alpha
-
-                app_name = self._media_app.replace('.exe', '').capitalize() if self._media_app else ''
-                painter.setOpacity(fade)
-                app_font_size = 7 + int(b * 1.5)
-                painter.setFont(QFont('Segoe UI', app_font_size))
-                painter.setPen(QColor(150, 150, 200, 220))
-                painter.drawText(text_x, text_top + 5, app_name)
-
-                art_rect = QRect(text_x, text_top + 29, text_w, 14)
-                artist_font_size = 7 + int(b * 1.5)
-                painter.setFont(QFont('Segoe UI', artist_font_size))
-                painter.setPen(QColor(180, 180, 220, 230))
-                art_fm = QFontMetrics(painter.font())
-                art_full = art_fm.horizontalAdvance(self._media_artist)
-                if art_full > text_w:
-                    art_max_s = art_full - text_w + 20
-                    s = self._title_scroll
-                    if s < 1.0:
-                        art_off = -art_max_s * s
-                    else:
-                        art_off = -art_max_s * (2.0 - s)
-                    painter.save()
-                    painter.setClipRect(art_rect)
-                    painter.drawText(int(text_x + art_off), text_top + 26, int(art_full + 30), 14,
-                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._media_artist)
-                    painter.restore()
+            for i, br in enumerate(btn_rects):
+                if self._pressed_btn == i:
+                    fill = QColor(150, 150, 220, 160)
+                    border = QColor(200, 200, 255, 200)
+                elif self._hovered_btn == i:
+                    fill = QColor(135, 135, 200, 120)
+                    border = QColor(180, 180, 240, 170)
                 else:
-                    painter.drawText(art_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._media_artist)
-
-                for i, br in enumerate(btn_rects):
-                    if self._pressed_btn == i:
-                        fill = QColor(150, 150, 220, 160)
-                        border = QColor(200, 200, 255, 200)
-                    elif self._hovered_btn == i:
-                        fill = QColor(135, 135, 200, 120)
-                        border = QColor(180, 180, 240, 170)
-                    else:
-                        fill = QColor(120, 120, 180, 80)
-                        border = QColor(160, 160, 220, 120)
-                    painter.setOpacity(fade)
-                    painter.setBrush(fill)
-                    painter.setPen(QPen(border, 1))
-                    painter.drawRoundedRect(br, 3, 3)
-                bc1 = btn_rects[1].center()
+                    fill = QColor(120, 120, 180, 80)
+                    border = QColor(160, 160, 220, 120)
                 painter.setOpacity(fade)
+                painter.setBrush(fill)
+                painter.setPen(QPen(border, 1))
+                painter.drawRoundedRect(br, 3, 3)
+            bc1 = btn_rects[1].center()
+            painter.setOpacity(fade)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(200, 200, 240, 200))
+            if self._media_state == 2:
+                painter.drawRect(bc1.x() - 3, bc1.y() - 4, 2, 8)
+                painter.drawRect(bc1.x() + 1, bc1.y() - 4, 2, 8)
+            else:
+                painter.drawPolygon([QPoint(bc1.x() - 3, bc1.y() - 4), QPoint(bc1.x() - 3, bc1.y() + 4), QPoint(bc1.x() + 4, bc1.y())])
+            for bi in (0, 2):
+                bc2 = btn_rects[bi].center()
                 painter.setPen(Qt.NoPen)
                 painter.setBrush(QColor(200, 200, 240, 200))
-                if self._media_state == 2:
-                    painter.drawRect(bc1.x() - 3, bc1.y() - 4, 2, 8)
-                    painter.drawRect(bc1.x() + 1, bc1.y() - 4, 2, 8)
+                if bi == 0:
+                    painter.drawPolygon([QPoint(bc2.x() - 3, bc2.y() - 4), QPoint(bc2.x() - 3, bc2.y() + 4), QPoint(bc2.x() + 4, bc2.y())])
                 else:
-                    painter.drawPolygon([QPoint(bc1.x() - 3, bc1.y() - 4), QPoint(bc1.x() - 3, bc1.y() + 4), QPoint(bc1.x() + 4, bc1.y())])
-                for bi in (0, 2):
-                    bc2 = btn_rects[bi].center()
-                    painter.setPen(Qt.NoPen)
-                    painter.setBrush(QColor(200, 200, 240, 200))
-                    if bi == 0:
-                        painter.drawPolygon([QPoint(bc2.x() - 3, bc2.y() - 4), QPoint(bc2.x() - 3, bc2.y() + 4), QPoint(bc2.x() + 4, bc2.y())])
-                    else:
-                        painter.drawPolygon([QPoint(bc2.x() + 3, bc2.y() - 4), QPoint(bc2.x() + 3, bc2.y() + 4), QPoint(bc2.x() - 4, bc2.y())])
+                    painter.drawPolygon([QPoint(bc2.x() + 3, bc2.y() - 4), QPoint(bc2.x() + 3, bc2.y() + 4), QPoint(bc2.x() - 4, bc2.y())])
 
-                if self._obs_draw_state > 0:
-                    painter.setOpacity(self._obs_alpha)
-                    dot_size = 10 if self._obs_draw_state == 2 else 8
-                    dot_x = layout['obs_dot_x']
-                    dot_y = layout['obs_dot_y'] - dot_size // 2
-                    gradient = QRadialGradient(dot_x, dot_y + dot_size / 2, dot_size / 2)
-                    if self._obs_draw_state == 2:
-                        gradient.setColorAt(0.0, QColor(140, 255, 140, 240))
-                        gradient.setColorAt(1.0, QColor(30, 150, 30, 240))
-                    else:
-                        gradient.setColorAt(0.0, QColor(255, 240, 100, 240))
-                        gradient.setColorAt(1.0, QColor(200, 150, 20, 240))
-                    painter.setBrush(QBrush(gradient))
-                    painter.setPen(Qt.NoPen)
-                    painter.drawEllipse(dot_x - dot_size // 2, dot_y, dot_size, dot_size)
+            if self._obs_draw_state > 0:
+                painter.setOpacity(self._obs_alpha)
+                dot_size = 10 if self._obs_draw_state == 2 else 8
+                dot_x = layout['obs_dot_x']
+                dot_y = layout['obs_dot_y'] - dot_size // 2
+                gradient = QRadialGradient(dot_x, dot_y + dot_size / 2, dot_size / 2)
+                if self._obs_draw_state == 2:
+                    gradient.setColorAt(0.0, QColor(140, 255, 140, 240))
+                    gradient.setColorAt(1.0, QColor(30, 150, 30, 240))
+                else:
+                    gradient.setColorAt(0.0, QColor(255, 240, 100, 240))
+                    gradient.setColorAt(1.0, QColor(200, 150, 20, 240))
+                painter.setBrush(QBrush(gradient))
+                painter.setPen(Qt.NoPen)
+                painter.drawEllipse(dot_x - dot_size // 2, dot_y, dot_size, dot_size)
 
-                painter.setOpacity(1.0)
+            painter.setOpacity(1.0)
 
     def _media_expanded_layout(self):
         r = self.rect()
@@ -1629,6 +1692,49 @@ class OverlayWindow(QWidget):
         self._anim_to(int(w * 0.75), h, OBS_ANIM_DURATION, _ease_incubic_outback, -h)
 
     # --- Mouse events (main branch exact) ---
+    # --- Sideswiper gestures ---
+    def _pages_count(self):
+        return max(1, len(self._active_pages()))
+
+    def _on_hold_armed(self):
+        if self._page_hold and not self._page_dragging:
+            self._page_dragging = True
+
+    def _start_page_flip(self, delta):
+        """Animate one page flip; delta -1 = next, +1 = prev."""
+        n = self._pages_count()
+        if n < 2:
+            return
+        target = (self._page + delta) % n
+        self._page_flip_anim.stop()
+        self._page_flip_anim.setDuration(350)
+        self._page_flip_anim.setStartValue(0.0)
+        self._page_flip_anim.setEndValue(1.0)
+        self._page_anim_sign = 1.0 if delta < 0 else -1.0   # +1 next, -1 prev
+        self._page_anim_target = target
+        self._page_dragging = True
+        self._page_flip_anim.start()
+
+    def _on_page_flip_step(self, t):
+        self._page_drag_off = -self.width() * t * self._page_anim_sign
+        self.update()
+
+    def _on_page_flip_finished(self):
+        self._page = self._page_anim_target
+        self._page_drag_off = 0.0
+        self._page_dragging = False
+        self.update()
+
+    def wheelEvent(self, event):
+        if len(self._active_pages()) < 2:
+            super().wheelEvent(event)
+            return
+        d = event.angleDelta().y()
+        if abs(d) >= 120:
+            self._start_page_flip(1 if d < 0 else -1)
+        else:
+            super().wheelEvent(event)
+
     def mousePressEvent(self, event):
         pos = event.position().toPoint()
         if self._toast_active:
@@ -1637,6 +1743,14 @@ class OverlayWindow(QWidget):
                 self._toast_pressed_btn = btn
                 self.update()
                 return
+        if (self._pages_count() > 1 and self._is_expanded and not self._page_hold
+                and self._btn_at(pos) < 0):   # buttons keep classic click path
+            self._page_hold = True
+            self._page_dragging = False
+            self._page_drag_off = 0.0
+            self._press_pos = event.position()
+            self._hold_timer.start(250)
+            return
         if self._media_state == 0 or not self._media_session or not self._is_expanded:
             super().mousePressEvent(event)
             return
@@ -1647,6 +1761,21 @@ class OverlayWindow(QWidget):
 
     def mouseReleaseEvent(self, event):
         pos = event.position().toPoint()
+        if self._page_hold:
+            self._hold_timer.stop()
+            self._page_hold = False
+            if self._page_dragging:
+                off = event.position().x() - self._press_pos.x()
+                self._page_dragging = False
+                self._page_drag_off = 0.0
+                threshold = self.width() * 0.3
+                n = self._pages_count()
+                if off <= -threshold and n > 1:
+                    self._page = (self._page + 1) % n
+                elif off >= threshold and n > 1:
+                    self._page = (self._page - 1) % n
+                self.update()
+            return
         if self._toast_pressed_btn >= 0:
             if self._toast_btn_at(pos) == self._toast_pressed_btn:
                 self._dismiss_toast()
@@ -1669,6 +1798,15 @@ class OverlayWindow(QWidget):
 
     def mouseMoveEvent(self, event):
         pos = event.position().toPoint()
+        if self._page_hold and not self._page_dragging and self._hold_timer.isActive():
+            # Fast deliberate drag before hold fires: arm immediately
+            if abs(event.position().x() - self._press_pos.x()) > 12:
+                self._hold_timer.stop()
+                self._on_hold_armed()
+        if self._page_dragging:
+            self._page_drag_off = event.position().x() - self._press_pos.x()
+            self.update()
+            return
         if self._toast_active:
             hovered = self._toast_btn_at(pos)
             if hovered != self._toast_hovered_btn:
