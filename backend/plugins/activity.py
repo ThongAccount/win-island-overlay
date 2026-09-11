@@ -1,5 +1,6 @@
 from typing import Dict, Any, Optional, Callable
 import ctypes
+import ctypes.wintypes
 import threading
 import time
 from dataclasses import dataclass, field
@@ -266,16 +267,10 @@ class ActivityPlugin(PluginBase):
             if length > 0:
                 buff = ctypes.create_unicode_buffer(length + 1)
                 user32.GetWindowTextW(hwnd, buff, length + 1)
-                title = buff.value
-            
-            # Get class name
-            class_name = ""
-            class_buff = ctypes.create_unicode_buffer(256)
-            user32.GetClassNameW(hwnd, class_buff, 256)
-            class_name = class_buff.value
-            
             # Get process name
-            _, pid = user32.GetWindowThreadProcessId(hwnd)
+            pid = ctypes.wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            pid = pid.value
             process_name = ""
             if pid:
                 h_process = kernel32.OpenProcess(0x0400 | 0x0010, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ

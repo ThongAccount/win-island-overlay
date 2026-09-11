@@ -92,7 +92,7 @@ class NotificationsPlugin(PluginBase):
             from winsdk.windows.ui.notifications import NotificationKinds
             
             async def listen():
-                listener = UserNotificationListener.get_current()
+                listener = UserNotificationListener()
                 # Request access
                 access = await listener.request_access_async()
                 if access != UserNotificationListenerAccessStatus.ALLOWED:
