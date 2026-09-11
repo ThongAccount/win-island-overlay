@@ -320,11 +320,6 @@ class OverlayWindow(QWidget):
         x = int((screen.width() - self._collapsed[0]) / 2.0)
         self.setGeometry(x, int(self._window_config.get('margin_top', MARGIN_TOP)), int(self._collapsed[0]), int(self._collapsed[1]))
 
-    def showEvent(self, event):
-        super().showEvent(event)
-        self._center()
-        self.registry.config['_window_ref'] = self
-
     # --- Event handling (plugin messages) ---
     def event(self, event):
         if event.type() == MediaResultEvent._type:

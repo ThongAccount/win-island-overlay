@@ -71,7 +71,12 @@ class NotificationsPlugin(PluginBase):
             from winsdk.windows.ui.notifications import NotificationKinds
             
             async def listen():
-                listener = UserNotificationListener()
+                # UserNotificationListener is not activatable — use the static
+                # Current property (projection exposes it as get_current()).
+                try:
+                    listener = UserNotificationListener.current
+                except (AttributeError, TypeError):
+                    listener = UserNotificationListener.get_current()
                 # Request access
                 access = await listener.request_access_async()
                 if access != UserNotificationListenerAccessStatus.ALLOWED:

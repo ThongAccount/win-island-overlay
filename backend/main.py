@@ -75,6 +75,7 @@ def main():
         if plugin:
             overlay.register_plugin(name, plugin)
 
+    overlay._center()
     overlay.show()
 
     # Auto-reload on .py file changes
