@@ -70,7 +70,7 @@ def main():
     registry.enable_all()
 
     # Register plugins with overlay for paint/event integration
-    for name in ['obs', 'media', 'notifications', 'weather', 'greeting', 'activity']:
+    for name in ['obs', 'media', 'notifications', 'weather', 'activity']:
         plugin = registry.get(name)
         if plugin:
             overlay.register_plugin(name, plugin)

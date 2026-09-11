@@ -22,14 +22,6 @@ WINDOW_CONFIG = {
 
 # Plugin configuration
 PLUGIN_CONFIG = {
-    'greeting': {
-        'text': 'Hello! 👋',
-        'font_size': 14,
-        'color': '#ffffff',
-        'duration_ms': 3000,
-        'show_on_startup': True,
-        'show_on_hover': True,
-    },
     'media': {
         'show_album_art': True,
         'show_controls': True,
