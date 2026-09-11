@@ -910,7 +910,7 @@ class OverlayWindow(QWidget):
         if self._toast_buttons:
             body_bottom = rect.height() - 34
         body_rect = QRect(tx, y0 + row_h * 2 + 5, tw, body_bottom - (y0 + row_h * 2 + 5))
-        painter.drawText(body_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, self._toast_body)
+        painter.drawText(body_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap, self._toast_body)
 
         if not self._toast_image.isNull():
             img_h = 60
