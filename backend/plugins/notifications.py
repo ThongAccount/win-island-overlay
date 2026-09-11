@@ -1,8 +1,6 @@
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, List
 import threading
-from PySide6.QtCore import QTimer, QEvent, Qt, QRect, QCoreApplication
-from PySide6.QtGui import QPainter, QColor, QFont, QPixmap, QImage
-from PySide6.QtWidgets import QLabel
+from PySide6.QtCore import QCoreApplication
 
 from backend.core.plugin import PluginBase, island_plugin, PluginRegistry
 from backend.core.events import EventBus, NotificationReceived, WindowStateChanged
@@ -32,17 +30,9 @@ class NotificationsPlugin(PluginBase):
         super().__init__(registry, config)
         self._window: Optional[OverlayWindow] = None
         
-        # Toast state (overlay owns rendering state)
+        # Data source only — overlay owns all rendering/animation state
         self._toasts: List[Dict[str, Any]] = []
-        self._toast_alpha = 0.0
-        self._toast_text_alpha = 0.0
-        self._toast_anim: Optional[QTimer] = None
-        self._toast_text_anim: Optional[QTimer] = None
-        self._toast_timer: Optional[QTimer] = None
-        self._toast_buttons: List[Dict[str, Any]] = []
-        self._hovered_btn = -1
-        self._pressed_btn = -1
-        
+
         # Listener thread
         self._listener_thread: Optional[threading.Thread] = None
         self._running = False
@@ -61,22 +51,11 @@ class NotificationsPlugin(PluginBase):
         # Start Windows toast listener thread
         self._listener_thread = threading.Thread(target=self._listener_thread_func, daemon=True)
         self._listener_thread.start()
-        
-        # Timer for toast dismissal
-        self._toast_timer = QTimer(self._window)
-        self._toast_timer.setSingleShot(True)
-        self._toast_timer.timeout.connect(self._dismiss_toast)
 
     def on_disable(self) -> None:
         self._running = False
         if self._listener_thread and self._listener_thread.is_alive():
             self._listener_thread.join(timeout=1.0)
-        if self._toast_timer:
-            self._toast_timer.stop()
-        if self._toast_anim:
-            self._toast_anim.stop()
-        if self._toast_text_anim:
-            self._toast_text_anim.stop()
 
     def on_unload(self) -> None:
         pass
@@ -237,9 +216,6 @@ class NotificationsPlugin(PluginBase):
 
     def _on_toast(self, data: Dict[str, Any]):
         """Bookkeeping / event bus — overlay owns display via ToastNotifEvent."""
-        if not self._window:
-            return
-
         self._toasts.insert(0, data)
         max_toasts = self.config.get("max_toasts", 5)
         if len(self._toasts) > max_toasts:
@@ -252,221 +228,3 @@ class NotificationsPlugin(PluginBase):
             icon_bytes=data["icon_bytes"],
             buttons=[b["label"] for b in data["buttons"]] if data.get("buttons") else []
         ))
-
-    def _show_latest_toast(self):
-        if not self._toasts:
-            return
-        
-        toast = self._toasts[0]
-        self._toast_buttons = toast.get("buttons", [])
-        
-        # Animate in
-        self._toast_alpha = 0.0
-        self._toast_text_alpha = 0.0
-        self._animate_toast_alpha(1.0, 300)
-        self._animate_toast_text_alpha(1.0, 300)
-        
-        # Set dismissal timer
-        duration = self.config.get("toast_duration_ms", 5000)
-        if self._toast_buttons:
-            duration = self.config.get("toast_duration_with_buttons_ms", 30000)
-        self._toast_timer.start(duration)
-        
-        if self._window:
-            self._window.update()
-
-    def _dismiss_toast(self):
-        if not self._toasts:
-            return
-        
-        self._animate_toast_alpha(0.0, 300)
-        self._animate_toast_text_alpha(0.0, 300)
-        
-        # Remove after animation
-        QTimer.singleShot(300, self._remove_current_toast)
-
-    def _remove_current_toast(self):
-        if self._toasts:
-            self._toasts.pop(0)
-            self._toast_buttons = []
-            self._hovered_btn = -1
-            self._pressed_btn = -1
-            
-            # Show next toast
-            if self._toasts:
-                QTimer.singleShot(100, self._show_latest_toast)
-            elif self._window:
-                self._window.update()
-
-    def _animate_toast_alpha(self, target: float, duration: int):
-        if self._toast_anim:
-            self._toast_anim.stop()
-        steps = 30
-        step_val = (target - self._toast_alpha) / steps
-        step_ms = duration // steps
-        current = self._toast_alpha
-        
-        def step():
-            nonlocal current
-            current += step_val
-            self._toast_alpha = max(0.0, min(1.0, current))
-            if self._window:
-                self._window.update()
-            if (step_val > 0 and current >= target) or (step_val < 0 and current <= target):
-                self._toast_alpha = target
-                self._toast_anim.stop()
-        
-        self._toast_anim = QTimer(self._window)
-        self._toast_anim.timeout.connect(step)
-        self._toast_anim.start(step_ms)
-
-    def _animate_toast_text_alpha(self, target: float, duration: int):
-        if self._toast_text_anim:
-            self._toast_text_anim.stop()
-        steps = 30
-        step_val = (target - self._toast_text_alpha) / steps
-        step_ms = duration // steps
-        current = self._toast_text_alpha
-        
-        def step():
-            nonlocal current
-            current += step_val
-            self._toast_text_alpha = max(0.0, min(1.0, current))
-            if self._window:
-                self._window.update()
-            if (step_val > 0 and current >= target) or (step_val < 0 and current <= target):
-                self._toast_text_alpha = target
-                self._toast_text_anim.stop()
-        
-        self._toast_text_anim = QTimer(self._window)
-        self._toast_text_anim.timeout.connect(step)
-        self._toast_text_anim.start(step_ms)
-
-    def get_toasts(self) -> List[Dict[str, Any]]:
-        return self._toasts[:]
-
-    def is_showing(self) -> bool:
-        return len(self._toasts) > 0 and self._toast_alpha > 0
-
-    def get_alpha(self) -> float:
-        return self._toast_alpha
-
-    def get_text_alpha(self) -> float:
-        return self._toast_text_alpha
-
-    def get_buttons(self) -> List[Dict[str, Any]]:
-        return self._toast_buttons[:]
-
-    def handle_click(self, pos) -> bool:
-        """Handle click on toast buttons. Returns True if handled."""
-        if not self._toast_buttons or self._toast_alpha <= 0:
-            return False
-        
-        if not self._window:
-            return False
-            
-        rect = self._window.rect()
-        btn_count = len(self._toast_buttons)
-        if btn_count == 0:
-            return False
-        
-        btn_w = 100
-        btn_h = 32
-        spacing = 8
-        total_w = btn_count * btn_w + (btn_count - 1) * spacing
-        start_x = (rect.width() - total_w) // 2
-        y = rect.bottom() - btn_h - 40
-        
-        for i, btn in enumerate(self._toast_buttons):
-            x = start_x + i * (btn_w + spacing)
-            btn_rect = QRect(x, y, btn_w, btn_h)
-            if btn_rect.contains(pos):
-                self._on_button_click(i, btn)
-                return True
-        
-        return False
-
-    def _on_button_click(self, index: int, btn: Dict[str, Any]):
-        """Handle toast button click."""
-        if self._toasts:
-            notif = self._toasts[0]
-            aumid = notif.get("app")
-            if aumid:
-                self._launch_app(aumid)
-        
-        self._dismiss_toast()
-
-    def _launch_app(self, aumid: str):
-        """Launch app by AUMID."""
-        try:
-            import subprocess
-            subprocess.Popen(
-                ['explorer.exe', f'shell:AppsFolder\\{aumid}'],
-                shell=True
-            )
-        except Exception as e:
-            print(f"[notifications] Launch error: {e}")
-
-    def handle_mouse_move(self, pos):
-        """Update hovered button."""
-        if not self._toast_buttons or not self._window:
-            self._hovered_btn = -1
-            return
-        
-        rect = self._window.rect()
-        btn_count = len(self._toast_buttons)
-        btn_w = 100
-        btn_h = 32
-        spacing = 8
-        total_w = btn_count * btn_w + (btn_count - 1) * spacing
-        start_x = (rect.width() - total_w) // 2
-        y = rect.bottom() - btn_h - 40
-        
-        old_hover = self._hovered_btn
-        self._hovered_btn = -1
-        
-        for i in range(btn_count):
-            x = start_x + i * (btn_w + spacing)
-            btn_rect = QRect(x, y, btn_w, btn_h)
-            if btn_rect.contains(pos):
-                self._hovered_btn = i
-                break
-        
-        if old_hover != self._hovered_btn and self._window:
-            self._window.update()
-
-    def handle_mouse_press(self, pos):
-        if self._hovered_btn >= 0:
-            self._pressed_btn = self._hovered_btn
-            if self._window:
-                self._window.update()
-
-    def handle_mouse_release(self, pos):
-        if self._pressed_btn >= 0 and self._hovered_btn == self._pressed_btn:
-            if self._toast_buttons and self._pressed_btn < len(self._toast_buttons):
-                self._on_button_click(self._pressed_btn, self._toast_buttons[self._pressed_btn])
-        self._pressed_btn = -1
-        if self._window:
-            self._window.update()
-
-    # --- Data getters for overlay ---
-    def is_showing(self) -> bool:
-        return len(self._toasts) > 0 and self._toast_alpha > 0
-
-    def get_alpha(self) -> float:
-        return self._toast_alpha
-
-    def get_text_alpha(self) -> float:
-        return self._toast_text_alpha
-
-    def get_buttons(self) -> List[Dict[str, Any]]:
-        return self._toast_buttons[:]
-
-    def get_hovered_btn(self) -> int:
-        return self._hovered_btn
-
-    def get_pressed_btn(self) -> int:
-        return self._pressed_btn
-
-    def get_toasts(self) -> List[Dict[str, Any]]:
-        return self._toasts[:]

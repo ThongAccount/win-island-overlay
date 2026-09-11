@@ -2,7 +2,7 @@ from typing import Dict, Any, Optional
 import ctypes
 import ctypes.wintypes
 import threading
-from PySide6.QtCore import QTimer, QEvent, Qt, QRect
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QPainter, QColor, QFont, QPixmap, QImage
 from PySide6.QtWidgets import QLabel
 
@@ -61,22 +61,9 @@ class OBSPlugin(PluginBase):
         super().__init__(registry, config)
         self._window: Optional[OverlayWindow] = None
         
-        # OBS state (overlay owns rendering state)
-        self._obs_state = 0  # 0=none, 1=idle, 2=recording/streaming
-        self._obs_draw_state = 0  # lags behind for fade-out
-        self._obs_alpha = 0.0
-        self._notification_active = False
-        self._notification_type = 0  # 0=off, 1=recording started, 2=streaming started
-        self._notif_icon_progress = 0.0
-        self._notif_text_alpha = 0.0
-        
+        # Data source only — overlay owns all rendering/animation state
         # Timers
         self._obs_timer: Optional[QTimer] = None
-        self._obs_fade_timer: Optional[QTimer] = None
-        self._notif_timer: Optional[QTimer] = None
-        self._obs_alpha_anim: Optional[QTimer] = None
-        self._notif_text_anim: Optional[QTimer] = None
-        self._notif_icon_anim: Optional[QTimer] = None
         self._obs_check_thread: Optional[threading.Thread] = None
         self._running = False
         
@@ -105,23 +92,11 @@ class OBSPlugin(PluginBase):
         
         # Initial check
         QTimer.singleShot(100, self._check_obs)
-        
-        # Fade timer
-        self._obs_fade_timer = QTimer(self._window)
-        self._obs_fade_timer.setSingleShot(True)
-        self._obs_fade_timer.timeout.connect(self._start_obs_fade_in)
-        
-        # Notification timer
-        self._notif_timer = QTimer(self._window)
-        self._notif_timer.setSingleShot(True)
-        self._notif_timer.timeout.connect(self._dismiss_notification)
 
     def on_disable(self) -> None:
         self._running = False
         if self._obs_timer:
             self._obs_timer.stop()
-        if self._obs_fade_timer:
-            self._obs_fade_timer.stop()
         if self._notif_timer:
             self._notif_timer.stop()
         if self._obs_check_thread and self._obs_check_thread.is_alive():
@@ -304,119 +279,3 @@ class OBSPlugin(PluginBase):
             recording=recording,
             streaming=streaming
         ))
-
-    def _start_obs_fade_in(self):
-        self._animate_obs_alpha(1.0, 500)
-
-    def _animate_obs_alpha(self, target: float, duration: int):
-        if self._obs_alpha_anim:
-            self._obs_alpha_anim.stop()
-        steps = 30
-        step_val = (target - self._obs_alpha) / steps
-        step_ms = duration // steps
-        current = self._obs_alpha
-        
-        def step():
-            nonlocal current
-            current += step_val
-            self._obs_alpha = max(0.0, min(1.0, current))
-            if self._window:
-                self._window.update()
-            if (step_val > 0 and current >= target) or (step_val < 0 and current <= target):
-                self._obs_alpha = target
-                self._obs_alpha_anim.stop()
-                if target == 0.0:
-                    self._obs_draw_state = 0
-        
-        self._obs_alpha_anim = QTimer(self._window)
-        self._obs_alpha_anim.timeout.connect(step)
-        self._obs_alpha_anim.start(step_ms)
-
-    def _show_notification(self, notif_type: int):
-        self._notification_active = True
-        self._notification_type = notif_type
-        self._notif_alpha = 0.0
-        self._notif_text_alpha = 0.0
-        self._notif_icon_progress = 0.0
-        
-        duration = self.config.get("notification_duration_ms", 4000)
-        self._notif_timer.start(duration)
-        
-        self._animate_notif_icon(1.0, 300)
-        self._animate_notif_text(1.0, 300)
-        
-        if self._window:
-            self._window.update()
-
-    def _dismiss_notification(self):
-        if self._window and self._window.property("_is_expanded"):
-            return  # Don't dismiss if expanded
-        self._animate_notif_icon(0.0, 300)
-        self._animate_notif_text(0.0, 300)
-        self._notification_active = False
-
-    def _animate_notif_icon(self, target: float, duration: int):
-        if self._notif_icon_anim:
-            self._notif_icon_anim.stop()
-        steps = 30
-        step_val = (target - self._notif_icon_progress) / steps
-        step_ms = duration // steps
-        current = self._notif_icon_progress
-        
-        def step():
-            nonlocal current
-            current += step_val
-            self._notif_icon_progress = max(0.0, min(1.0, current))
-            if self._window:
-                self._window.update()
-            if (step_val > 0 and current >= target) or (step_val < 0 and current <= target):
-                self._notif_icon_progress = target
-                self._notif_icon_anim.stop()
-        
-        self._notif_icon_anim = QTimer(self._window)
-        self._notif_icon_anim.timeout.connect(step)
-        self._notif_icon_anim.start(step_ms)
-
-    def _animate_notif_text(self, target: float, duration: int):
-        if self._notif_text_anim:
-            self._notif_text_anim.stop()
-        steps = 30
-        step_val = (target - self._notif_text_alpha) / steps
-        step_ms = duration // steps
-        current = self._notif_text_alpha
-        
-        def step():
-            nonlocal current
-            current += step_val
-            self._notif_text_alpha = max(0.0, min(1.0, current))
-            if self._window:
-                self._window.update()
-            if (step_val > 0 and current >= target) or (step_val < 0 and current <= target):
-                self._notif_text_alpha = target
-                self._notif_text_anim.stop()
-        
-        self._notif_text_anim = QTimer(self._window)
-        self._notif_text_anim.timeout.connect(step)
-        self._notif_text_anim.start(step_ms)
-
-    # --- Data getters for overlay ---
-    def get_obs_state(self) -> int:
-        return self._obs_state
-
-    def is_recording(self) -> bool:
-        return self._obs_state == 2
-
-    def is_streaming(self) -> bool:
-        return self._obs_state == 2
-
-    def get_alpha(self) -> float:
-        return self._obs_alpha
-
-    def get_notification_state(self) -> Dict[str, Any]:
-        return {
-            "active": self._notification_active,
-            "type": self._notification_type,
-            "alpha": self._notif_alpha,
-            "text_alpha": self._notif_text_alpha,
-            "icon_progress": self._notif_icon_progress,
-        }

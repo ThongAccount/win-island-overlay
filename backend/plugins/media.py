@@ -1,10 +1,7 @@
 from typing import Dict, Any, Optional
 import threading
 import asyncio
-import time
-from PySide6.QtCore import QTimer, QEvent, Qt, QRect, QCoreApplication
-from PySide6.QtWidgets import QLabel
-from PySide6.QtGui import QPixmap, QPainter, QColor, QFont, QPainterPath, QImage
+from PySide6.QtCore import QTimer, QCoreApplication
 
 from backend.core.plugin import PluginBase, island_plugin, PluginRegistry
 from backend.core.events import EventBus, MediaSessionChanged, WindowStateChanged
@@ -156,14 +153,7 @@ class MediaPlugin(PluginBase):
         super().__init__(registry, config)
         self._window: Optional[OverlayWindow] = None
         
-        # Media state (overlay owns rendering state, we provide data)
-        self._media_state = 0  # 0=none, 1=paused, 2=playing
-        self._media_title = ""
-        self._media_artist = ""
-        self._media_app = ""
-        self._media_thumb_bytes = b""
-        self._media_position = 0.0
-        self._media_duration = 0.0
+        # Data source only — overlay owns all rendering/animation state
         self._media_session = None
         self._media_loop = None
         self._media_seq = 0
@@ -356,203 +346,11 @@ class MediaPlugin(PluginBase):
             self._media_seq += 1
             QCoreApplication.postEvent(self._window, MediaResultEvent(('', '', '', 0, None, 0.0, 0.0, None)))
 
-    def _on_media_result(self, result) -> None:
-        """Handle media result from background thread (called via event)."""
-        if not self._window:
-            return
-            
-        title, artist, app_name, status, thumb_bytes, pos_sec, dur_sec, session = result
-
-        new_state = 0
-        if status == 4:
-            new_state = 2  # PLAYING
-        elif status == 5:
-            new_state = 1  # PAUSED
-
-        prev_state = self._media_state
-        text_changed = (title != self._media_title or artist != self._media_artist)
-        meta_changed = (
-            pos_sec != self._media_position
-            or dur_sec != self._media_duration
-            or thumb_bytes is not None
-        )
-
-        need_resize = new_state != prev_state or text_changed
-        
-        # Fade out when media stops
-        if prev_state > 0 and new_state == 0:
-            self._animate_media_alpha(0.0, 300)
-        # Fade in when media starts
-        elif prev_state == 0 and new_state > 0:
-            self._animate_media_alpha(1.0, 300)
-
-        self._media_state = new_state
-        if new_state > 0 or prev_state == 0:
-            self._media_title = title
-            self._media_artist = artist
-            self._media_app = app_name
-        self._media_session = session
-        self._media_duration = dur_sec
-        
-        # Only update position if it actually changed or state changed
-        if abs(pos_sec - self._media_position) > 0.5 or prev_state != new_state or prev_state == 0:
-            self._media_position = pos_sec
-            # Reset to current time to restart interpolation from this position
-            self._media_position_fetch_time = time.time() if new_state == 2 else 0.0
-        
-        thumb_key = f'{title}|{artist}|{app_name}'
-        if thumb_bytes:
-            self._media_thumb_key = thumb_key
-            self._media_thumb_cache = thumb_bytes
-            self._load_thumbnail(thumb_bytes)
-        elif new_state == 0 and prev_state == 0:
-            self._media_thumb_key = ''
-            self._media_thumb_cache = None
-        elif thumb_key != self._media_thumb_key:
-            pass  # Keep cached thumbnail
-
-        if text_changed and new_state > 0:
-            self._animate_media_text_alpha(1.0, 300)
-            self._start_title_scroll()
-        else:
-            self._media_text_alpha = 1.0
-
-        if need_resize:
-            if new_state > 0 and prev_state == 0:
-                self._media_alpha = 0.0
-                self._animate_media_alpha(1.0, 300)
-            elif new_state == 0 and prev_state > 0:
-                self._animate_media_alpha(0.0, 300)
-        
-        if need_resize or meta_changed:
-            if self._window:
-                self._window.update()
-
-    def _load_thumbnail(self, thumb_bytes: bytes):
-        if not thumb_bytes:
-            return
-        try:
-            img = QImage.fromData(thumb_bytes)
-            if not img.isNull():
-                self._media_thumb = QPixmap.fromImage(img).scaled(
-                    48, 48, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
-                )
-        except:
-            pass
-
-    def _animate_media_alpha(self, target: float, duration: int):
-        if self._media_alpha_anim:
-            self._media_alpha_anim.stop()
-        steps = 30
-        step_val = (target - self._media_alpha) / steps
-        step_ms = duration // steps
-        current = self._media_alpha
-        
-        def step():
-            nonlocal current
-            current += step_val
-            self._media_alpha = max(0.0, min(1.0, current))
-            if self._window:
-                self._window.update()
-            if (step_val > 0 and current >= target) or (step_val < 0 and current <= target):
-                self._media_alpha = target
-                self._media_alpha_anim.stop()
-        
-        self._media_alpha_anim = QTimer(self._window)
-        self._media_alpha_anim.timeout.connect(step)
-        self._media_alpha_anim.start(step_ms)
-
-    def _animate_media_text_alpha(self, target: float, duration: int):
-        if self._media_text_anim:
-            self._media_text_anim.stop()
-        steps = 30
-        step_val = (target - self._media_text_alpha) / steps
-        step_ms = duration // steps
-        current = self._media_text_alpha
-        
-        def step():
-            nonlocal current
-            current += step_val
-            self._media_text_alpha = max(0.0, min(1.0, current))
-            if self._window:
-                self._window.update()
-            if (step_val > 0 and current >= target) or (step_val < 0 and current <= target):
-                self._media_text_alpha = target
-                self._media_text_anim.stop()
-        
-        self._media_text_anim = QTimer(self._window)
-        self._media_text_anim.timeout.connect(step)
-        self._media_text_anim.start(step_ms)
-
-    def _start_title_scroll(self):
-        if self._title_scroll_anim:
-            self._title_scroll_anim.stop()
-        self._title_scroll = 0.0
-        self._title_scroll_anim = QTimer(self._window)
-        self._title_scroll_anim.timeout.connect(lambda: self._window.update() if self._window else None)
-        self._title_scroll_anim.start(16)  # 60 FPS
-
-    def _update_viz(self):
-        if self._media_state == 0:
-            return
-        
-        # Get real-time FFT bands
-        if self._audio_fft:
-            self._audio_levels = self._audio_fft.get_bands()
-        
-        changed = False
-        for i in range(min(8, len(self._audio_levels))):
-            speed = 0.25
-            target = self._audio_levels[i] if self._media_state == 2 else 0.1
-            diff = target - self._viz_bars[i]
-            if abs(diff) > 0.005:
-                self._viz_bars[i] += diff * speed
-                changed = True
-        if changed and self._media_state > 0 and self._window:
-            self._window.update()
-
-    # --- Data getters for overlay ---
-    def get_media_state(self) -> int:
-        return self._media_state
-
-    def get_media_info(self) -> Dict[str, Any]:
-        return {
-            "state": self._media_state,
-            "title": self._media_title,
-            "artist": self._media_artist,
-            "app": self._media_app,
-            "position": self._media_position,
-            "duration": self._media_duration,
-            "thumb_pixmap": getattr(self, '_media_thumb', None),
-        }
-
-    def get_visualizer_bands(self) -> list:
-        return getattr(self, '_viz_bars', [0.0] * 8)[:]
-
-    def get_alpha(self) -> float:
-        return getattr(self, '_media_alpha', 0.0)
-
-    def get_text_alpha(self) -> float:
-        return getattr(self, '_media_text_alpha', 1.0)
-
-    def get_title_scroll(self) -> float:
-        return getattr(self, '_title_scroll', 0.0)
-
     def do_action(self, action: str, seek_seconds: Optional[float] = None):
-        """Play/pause/next/prev/seek with optimistic UI update."""
+        """Play/pause/next/prev/seek."""
         if not self._media_session or not self._media_loop:
             return
-        
-        # Instant optimistic update
-        if action == "play":
-            self._media_state = 2
-            if self._window:
-                self._window.update()
-        elif action == "pause":
-            self._media_state = 1
-            if self._window:
-                self._window.update()
-        
+
         async def do_async():
             try:
                 if action == "play":

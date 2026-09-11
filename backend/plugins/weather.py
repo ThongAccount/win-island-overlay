@@ -1,8 +1,7 @@
 from typing import Dict, Any, Optional
 import threading
 import time
-from PySide6.QtCore import QTimer, QEvent, Qt, QCoreApplication
-from PySide6.QtWidgets import QLabel
+from PySide6.QtCore import QTimer, QCoreApplication
 
 from backend.core.plugin import PluginBase, island_plugin, PluginRegistry
 from backend.core.events import EventBus
@@ -30,19 +29,11 @@ class WeatherPlugin(PluginBase):
         super().__init__(registry, config)
         self._window: Optional[OverlayWindow] = None
         
-        # Weather state (overlay owns rendering state)
+        # Data source only — overlay owns all rendering/animation state
         self._weather_data: Optional[Dict[str, Any]] = None
-        self._weather_active = False
-        self._weather_dismissed = False
-        self._weather_hovered = False
-        self._weather_alpha = 0.0
-        self._weather_icon_progress = 0.0
-        self._weather_text_alpha = 0.0
-        
+
         # Timers
         self._weather_timer: Optional[QTimer] = None
-        self._weather_icon_anim: Optional[QTimer] = None
-        self._weather_text_anim: Optional[QTimer] = None
         self._update_thread: Optional[threading.Thread] = None
         self._running = False
 
@@ -71,10 +62,6 @@ class WeatherPlugin(PluginBase):
         self._running = False
         if self._weather_timer:
             self._weather_timer.stop()
-        if self._weather_icon_anim:
-            self._weather_icon_anim.stop()
-        if self._weather_text_anim:
-            self._weather_text_anim.stop()
         if self._update_thread and self._update_thread.is_alive():
             self._update_thread.join(timeout=1.0)
 
@@ -140,8 +127,6 @@ class WeatherPlugin(PluginBase):
             
             if self._window:
                 QCoreApplication.postEvent(self._window, WeatherEvent(data))
-            else:
-                QTimer.singleShot(0, lambda: self._on_weather(data))
             
         except Exception as e:
             print(f"[weather] Fetch error: {e}")
@@ -179,84 +164,6 @@ class WeatherPlugin(PluginBase):
             levels = ['Good', 'Fair', 'Moderate', 'Poor', 'Very Poor']
             return {'aqi': aqi * 50, 'level': levels[aqi - 1] if 1 <= aqi <= 5 else 'Unknown'}
         except:
-            return {'aqi': 0, 'level': 'Unknown'}
-
-    def _on_weather(self, data: Dict[str, Any]):
-        """Fallback bookkeeping if event post unavailable — prefer WeatherEvent."""
-        if not self._window:
-            return
-        self._weather_data = data
-        # Overlay owns display; only post if somehow not already displayed
-        if not self._window._weather_active:
-            from backend.core.overlay import WeatherEvent
-            from PySide6.QtCore import QCoreApplication
-            QCoreApplication.postEvent(self._window, WeatherEvent(data))
-
-    def _dismiss_weather(self):
-        if self._window and self._window.property("_is_expanded"):
-            return  # Don't dismiss if expanded
-        
-        self._animate_weather_icon(0.0, 300)
-        self._animate_weather_text(0.0, 300)
-        self._weather_active = False
-        self._weather_dismissed = True
-
-    def _animate_weather_icon(self, target: float, duration: int):
-        if self._weather_icon_anim:
-            self._weather_icon_anim.stop()
-        steps = 30
-        step_val = (target - self._weather_icon_progress) / steps
-        step_ms = duration // steps
-        current = self._weather_icon_progress
-        
-        def step():
-            nonlocal current
-            current += step_val
-            self._weather_icon_progress = max(0.0, min(1.0, current))
-            if self._window:
-                self._window.update()
-            if (step_val > 0 and current >= target) or (step_val < 0 and current <= target):
-                self._weather_icon_progress = target
-                self._weather_icon_anim.stop()
-        
-        self._weather_icon_anim = QTimer(self._window)
-        self._weather_icon_anim.timeout.connect(step)
-        self._weather_icon_anim.start(step_ms)
-
-    def _animate_weather_text(self, target: float, duration: int):
-        if self._weather_text_anim:
-            self._weather_text_anim.stop()
-        steps = 30
-        step_val = (target - self._weather_text_alpha) / steps
-        step_ms = duration // steps
-        current = self._weather_text_alpha
-        
-        def step():
-            nonlocal current
-            current += step_val
-            self._weather_text_alpha = max(0.0, min(1.0, current))
-            if self._window:
-                self._window.update()
-            if (step_val > 0 and current >= target) or (step_val < 0 and current <= target):
-                self._weather_text_alpha = target
-                self._weather_text_anim.stop()
-        
-        self._weather_text_anim = QTimer(self._window)
-        self._weather_text_anim.timeout.connect(step)
-        self._weather_text_anim.start(step_ms)
-
-    # --- Data getters for overlay ---
-    def is_active(self) -> bool:
-        return self._weather_active and self._weather_alpha > 0
-
+            return {'aqi': 0, 'level': 'Unknown'}    # --- Data getters for overlay ---
     def get_weather_data(self) -> Optional[Dict[str, Any]]:
         return self._weather_data
-
-    def get_alpha(self) -> float:
-        return self._weather_alpha
-
-    def get_icon_progress(self) -> float:
-        return self._weather_icon_progress
-
-    def get_text_alpha(self) -> float:
-        return self._weather_text_alpha
