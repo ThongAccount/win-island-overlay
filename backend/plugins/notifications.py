@@ -6,22 +6,16 @@ from backend.core.plugin import PluginBase, island_plugin, PluginRegistry
 from backend.core.events import EventBus, NotificationReceived, WindowStateChanged
 from backend.core.overlay import OverlayWindow, ToastNotifEvent
 
-
 @island_plugin(
     name="notifications",
     version="1.0.0",
-    description="Windows toast notifications listener: displays toasts with actions, per-app filtering",
+    description="Windows toast notifications listener: displays toasts, per-app filtering",
     author="win-island-overlay",
     dependencies=[],
     config_schema={
         "enabled_apps": [],  # Empty = all apps
         "blocked_apps": [],  # Apps to ignore
         "max_toasts": 5,
-        "toast_duration_ms": 5000,
-        "toast_duration_with_buttons_ms": 30000,
-        "show_icons": True,
-        "show_buttons": True,
-        "position": "bottom",  # bottom, top, center
     },
     enabled_by_default=True,
 )
@@ -61,175 +55,111 @@ class NotificationsPlugin(PluginBase):
         pass
 
     def _listener_thread_func(self):
-        """Background thread for Windows toast notifications."""
-        try:
-            import pythoncom
-            pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
-            
-            # Import Windows Runtime
-            from winsdk.windows.ui.notifications.management import UserNotificationListener, UserNotificationListenerAccessStatus
-            from winsdk.windows.ui.notifications import NotificationKinds, ToastTemplateType, UserNotificationChangedKind
-            
-            async def listen():
-                # UserNotificationListener is not activatable — use the static
-                # Current property (projection exposes it as get_current()).
-                try:
-                    listener = UserNotificationListener.current
-                except (AttributeError, TypeError):
-                    listener = UserNotificationListener.get_current()
-                # Request access
-                access = await listener.request_access_async()
+        """Background thread: poll UserNotificationListener (main branch approach).
+
+        The change-event API is unavailable via winsdk's python projection
+        (add_notification_changed only), so poll every 0.5s and diff ids.
+        """
+        import pythoncom
+        pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
+        import asyncio
+        import datetime
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        async def poll():
+            try:
+                from winsdk.windows.ui.notifications.management import UserNotificationListener, UserNotificationListenerAccessStatus
+                from winsdk.windows.ui.notifications import NotificationKinds
+
+                # UserNotificationListener is not activatable — static Current only
+                listener = UserNotificationListener.current
+                access = await asyncio.wait_for(listener.request_access_async(), timeout=5.0)
                 if access != UserNotificationListenerAccessStatus.ALLOWED:
-                    print("[notifications] Access denied")
+                    print(f"[notifications] Access denied: {access}")
                     return
-                
-                # Get existing notifications
-                notifications = await listener.get_notifications_async(NotificationKinds.TOAST)
-                for notif in notifications:
-                    self._process_notification(notif)
-                
-                # Listen for new notifications
-                def on_notification_changed(sender, args):
-                    if args.kind == NotificationKinds.TOAST and args.change == UserNotificationChangedKind.ADDED:
-                        notif = sender.get_notification(args.notification_id)
-                        self._process_notification(notif)
-                
-                listener.notification_changed += on_notification_changed
-                
-                # Keep thread alive
+
+                seen_ids = set()
+
+                # Pre-populate with existing notifications to skip them
+                existing = await asyncio.wait_for(listener.get_notifications_async(NotificationKinds.TOAST), timeout=3.0)
+                for n in list(existing):
+                    seen_ids.add(n.id)
+
+                print(f"[notifications] Listener started, skipping {len(seen_ids)} existing notifications")
+
                 while self._running:
-                    pythoncom.PumpWaitingMessages()
-                    import time
-                    time.sleep(0.1)
-            
-            import asyncio
-            asyncio.run(listen())
-            
-        except Exception as e:
-            print(f"[notifications] Listener error: {e}")
+                    try:
+                        notifs = await asyncio.wait_for(listener.get_notifications_async(NotificationKinds.TOAST), timeout=2.0)
+                        current_ids = set()
+                        for n in list(notifs):
+                            nid = n.id
+                            current_ids.add(nid)
+                            if nid in seen_ids:
+                                continue
+                            seen_ids.add(nid)
+                            try:
+                                app = 'Unknown app'
+                                try:
+                                    if n.app_info and n.app_info.display_info:
+                                        app = n.app_info.display_info.display_name or 'Unknown app'
+                                except:
+                                    pass
 
-    def _process_notification(self, notification):
-        """Extract data from Windows notification."""
-        try:
-            app_name = notification.app_info.display_info.display_name if notification.app_info else "Unknown"
-            
-            # Check filters
-            enabled_apps = self.config.get("enabled_apps", [])
-            blocked_apps = self.config.get("blocked_apps", [])
-            
-            if enabled_apps and app_name not in enabled_apps:
-                return
-            if app_name in blocked_apps:
-                return
-            
-            # Extract text content
-            binding = notification.notification.visual.get_binding(ToastTemplateType.TOAST_GENERIC)
-            if not binding:
-                binding = notification.notification.visual.get_binding(ToastTemplateType.TOAST_IMAGE_AND_TEXT01)
-            if not binding:
-                binding = notification.notification.visual.get_binding(ToastTemplateType.TOAST_TEXT01)
-            
-            title = ""
-            body = ""
-            if binding:
-                texts = binding.get_text_elements()
-                for text in texts:
-                    if not title:
-                        title = str(text.text)
-                    elif not body:
-                        body = str(text.text)
-            
-            # Extract icon
-            icon_bytes = b""
-            if self.config.get("show_icons", True) and binding:
-                try:
-                    images = binding.get_image_elements()
-                    for img in images:
-                        if img.image:
-                            # This is simplified - actual extraction is more complex
-                            pass
-                except:
-                    pass
-            
-            # Extract buttons/actions
-            buttons = []
-            if self.config.get("show_buttons", True):
-                try:
-                    actions = notification.notification.actions
-                    for action in actions:
-                        buttons.append({
-                            "id": str(action.id),
-                            "label": str(action.content),
-                            "type": str(action.activation_type),
-                        })
-                except:
-                    pass
-            
-            data = {
-                "app": app_name,
-                "title": title,
-                "body": body,
-                "timestamp": notification.timestamp,
-                "icon_bytes": icon_bytes,
-                "buttons": buttons,
-                "notification_id": str(notification.id),
-            }
-            
-            # Post to overlay (main-thread) with main-branch payload shape
-            import datetime
-            time_str = 'just now'
-            try:
-                ct = notification.timestamp
-                now = datetime.datetime.now(datetime.timezone.utc)
-                if hasattr(ct, 'astimezone'):
-                    diff = int((now - ct).total_seconds())
-                    if diff < 60:
-                        time_str = 'just now'
-                    elif diff < 3600:
-                        time_str = f'{diff // 60}m ago'
-                    else:
-                        time_str = ct.astimezone().strftime('%H:%M')
-            except Exception:
-                pass
+                                binding = n.notification.visual.get_binding("ToastGeneric")
+                                if not binding:
+                                    continue
+                                texts = [t.text for t in binding.get_text_elements() if t.text]
+                                if not texts:
+                                    continue
+                                title = texts[0] if texts else ''
+                                body = texts[1] if len(texts) > 1 else ''
 
-            aumid = None
-            try:
-                if notification.app_info:
-                    aumid = notification.app_info.id
-            except Exception:
-                pass
+                                # UserNotificationListener API exposes no action buttons/images
+                                buttons = []
+                                image_path = None
 
-            overlay_payload = {
-                'app': app_name,
-                'title': title,
-                'body': body,
-                'time': time_str,
-                'icon': icon_bytes or None,
-                'buttons': [b.get('label', '') for b in buttons] if buttons else [],
-                'image': None,
-                'aumid': aumid,
-                'notif_id': str(notification.id),
-            }
-            if self._window:
-                QCoreApplication.postEvent(self._window, ToastNotifEvent(overlay_payload))
+                                # AUMID for app launch
+                                aumid = None
+                                try:
+                                    if n.app_info:
+                                        aumid = n.app_info.id
+                                except:
+                                    pass
 
-            # Keep plugin queue for bookkeeping / event bus
-            QTimer.singleShot(0, lambda: self._on_toast(data))
-            
-        except Exception as e:
-            print(f"[notifications] Process error: {e}")
+                                ct = n.creation_time
+                                now = datetime.datetime.now(datetime.timezone.utc)
+                                diff = int((now - ct).total_seconds())
+                                if diff < 60:
+                                    time_str = 'just now'
+                                elif diff < 3600:
+                                    time_str = f'{diff // 60}m ago'
+                                else:
+                                    time_str = ct.astimezone().strftime('%H:%M')
 
-    def _on_toast(self, data: Dict[str, Any]):
-        """Bookkeeping / event bus — overlay owns display via ToastNotifEvent."""
-        self._toasts.insert(0, data)
-        max_toasts = self.config.get("max_toasts", 5)
-        if len(self._toasts) > max_toasts:
-            self._toasts = self._toasts[:max_toasts]
+                                self.registry.event_bus.publish(NotificationReceived(
+                                    app_name=app, title=title, body=body,
+                                    icon_bytes=b"", buttons=[],
+                                ))
 
-        self.registry.event_bus.publish(NotificationReceived(
-            app_name=data["app"],
-            title=data["title"],
-            body=data["body"],
-            icon_bytes=data["icon_bytes"],
-            buttons=[b["label"] for b in data["buttons"]] if data.get("buttons") else []
-        ))
+                                print(f"[notifications] New: {app} - {title}")
+                                QCoreApplication.postEvent(self._window, ToastNotifEvent({
+                                    'app': app, 'title': title, 'body': body,
+                                    'time': time_str, 'icon': None, 'buttons': buttons,
+                                    'image': image_path, 'aumid': aumid, 'notif_id': nid
+                                }))
+                            except Exception as e:
+                                print(f"[notifications] Parse error: {e}")
+                        seen_ids &= current_ids
+                        await asyncio.sleep(0.5)
+                    except asyncio.TimeoutError:
+                        print("[notifications] Poll timeout, continuing...")
+                        await asyncio.sleep(1.0)
+                    except Exception as e:
+                        print(f"[notifications] Fetch error: {e}")
+                        await asyncio.sleep(1.0)
+            except Exception as e:
+                print(f"[notifications] Listener error: {e}")
+
+        loop.run_until_complete(poll())
+
