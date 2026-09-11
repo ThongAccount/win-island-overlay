@@ -385,6 +385,7 @@ class OverlayWindow(QWidget):
         self._page = 0                     # current page index into _active_pages()
         self._page_anim_target = 0
         self._page_anim_sign = 0.0
+        self._page_flip_start = 0.0
         self._page_hold = False            # press-and-hold armed
         self._page_dragging = False        # actively swiping
         self._page_drag_off = 0.0          # live drag offset in px (neg = toward next)
@@ -697,6 +698,8 @@ class OverlayWindow(QWidget):
         self._proximity_timer.start(100)
 
     def _check_mouse(self):
+        if self._page_hold or self._page_dragging:
+            return
         if not self.isVisible() or self._is_hiding:
             return
         cursor = QCursor.pos()
@@ -1032,8 +1035,8 @@ class OverlayWindow(QWidget):
 
         painter.restore()
 
-        # Page dots (only when >1 page and expanded)
-        if len(pages) > 1 and self._expand_progress > 0.5:
+        # Page dots (only when >1 page) — visible collapsed too as hint
+        if len(pages) > 1:
             n = len(pages)
             dot_y = rect.height() - 8
             dot_gap = 10
@@ -1700,23 +1703,25 @@ class OverlayWindow(QWidget):
         if self._page_hold and not self._page_dragging:
             self._page_dragging = True
 
-    def _start_page_flip(self, delta):
-        """Animate one page flip; delta -1 = next, +1 = prev."""
+    def _start_page_flip(self, delta, start_off=0.0):
+        """Animate one page flip; delta -1 = next, +1 = prev. start_off = drag offset."""
         n = self._pages_count()
         if n < 2:
             return
         target = (self._page + delta) % n
         self._page_flip_anim.stop()
-        self._page_flip_anim.setDuration(350)
+        self._page_flip_anim.setDuration(300)
         self._page_flip_anim.setStartValue(0.0)
         self._page_flip_anim.setEndValue(1.0)
         self._page_anim_sign = 1.0 if delta < 0 else -1.0   # +1 next, -1 prev
         self._page_anim_target = target
+        self._page_flip_start = start_off
         self._page_dragging = True
         self._page_flip_anim.start()
 
     def _on_page_flip_step(self, t):
-        self._page_drag_off = -self.width() * t * self._page_anim_sign
+        end = -self.width() * self._page_anim_sign
+        self._page_drag_off = self._page_flip_start + (end - self._page_flip_start) * t
         self.update()
 
     def _on_page_flip_finished(self):
@@ -1744,7 +1749,8 @@ class OverlayWindow(QWidget):
                 self.update()
                 return
         if (self._pages_count() > 1 and self._is_expanded and not self._page_hold
-                and self._btn_at(pos) < 0):   # buttons keep classic click path
+                and not (self._page % max(1, len(self._active_pages())) == 0
+                         and self._btn_at(pos) >= 0)):  # media-page buttons keep clicks
             self._page_hold = True
             self._page_dragging = False
             self._page_drag_off = 0.0
@@ -1766,14 +1772,15 @@ class OverlayWindow(QWidget):
             self._page_hold = False
             if self._page_dragging:
                 off = event.position().x() - self._press_pos.x()
-                self._page_dragging = False
-                self._page_drag_off = 0.0
                 threshold = self.width() * 0.3
                 n = self._pages_count()
                 if off <= -threshold and n > 1:
-                    self._page = (self._page + 1) % n
+                    self._start_page_flip(1, off)    # commit next, animate
                 elif off >= threshold and n > 1:
-                    self._page = (self._page - 1) % n
+                    self._start_page_flip(-1, off)   # commit prev, animate
+                else:
+                    self._page_dragging = False
+                    self._page_drag_off = 0.0        # snap back
                 self.update()
             return
         if self._toast_pressed_btn >= 0:
@@ -1826,6 +1833,8 @@ class OverlayWindow(QWidget):
                 plugin.handle_mouse_move(pos)
 
     def leaveEvent(self, event):
+        if self._page_hold or self._page_dragging:
+            return  # dragging may leave bounds — don't collapse mid-swipe
         if self._hovered_btn >= 0 or self._pressed_btn >= 0:
             self._hovered_btn = -1
             self._pressed_btn = -1
