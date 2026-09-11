@@ -67,8 +67,8 @@ class NotificationsPlugin(PluginBase):
             pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
             
             # Import Windows Runtime
-            from winsdk.windows.ui.notifications.management import UserNotificationListener, UserNotificationListenerAccessStatus
-            from winsdk.windows.ui.notifications import NotificationKinds, NotificationChangeType, ToastTemplateType
+            from winsdk.windows.ui.notifications.management import UserNotificationListener, UserNotificationListenerAccessStatus, NotificationChangeType
+            from winsdk.windows.ui.notifications import NotificationKinds, ToastTemplateType
             
             async def listen():
                 # UserNotificationListener is not activatable — use the static
