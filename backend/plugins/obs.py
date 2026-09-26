@@ -3,11 +3,10 @@ import ctypes
 import ctypes.wintypes
 import threading
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QPainter, QColor, QFont, QPixmap, QImage
-from PySide6.QtWidgets import QLabel
+from PySide6.QtGui import QPainter, QColor, QPixmap, QImage
 
 from backend.core.plugin import PluginBase, island_plugin, PluginRegistry
-from backend.core.events import EventBus, OBSStateChanged, WindowStateChanged
+from backend.core.events import OBSStateChanged
 from backend.core.overlay import OverlayWindow
 
 
@@ -70,6 +69,10 @@ class OBSPlugin(PluginBase):
         # OBS icon
         self._obs_icon: Optional[QPixmap] = None
 
+        # Change-detection state (this plugin's own copy; overlay has its own)
+        self._obs_state = 0  # 0=inactive, 1=idle, 2=recording/streaming
+        self._obs_draw_state = 0  # lags behind _obs_state for fade-out
+
     def on_load(self) -> None:
         pass
 
@@ -97,16 +100,8 @@ class OBSPlugin(PluginBase):
         self._running = False
         if self._obs_timer:
             self._obs_timer.stop()
-        if self._notif_timer:
-            self._notif_timer.stop()
         if self._obs_check_thread and self._obs_check_thread.is_alive():
             self._obs_check_thread.join(timeout=1.0)
-        if self._obs_alpha_anim:
-            self._obs_alpha_anim.stop()
-        if self._notif_text_anim:
-            self._notif_text_anim.stop()
-        if self._notif_icon_anim:
-            self._notif_icon_anim.stop()
 
     def on_unload(self) -> None:
         pass

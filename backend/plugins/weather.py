@@ -8,6 +8,21 @@ from backend.core.events import EventBus
 from backend.core.overlay import OverlayWindow, WeatherEvent
 
 
+# Mock data — the no-key fallback. Kept at module scope so the no-key path
+# needs neither a network nor the `requests` dependency to work.
+_MOCK_WEATHER = {
+    'temp': '24',
+    'condition': 'Partly Cloudy',
+    'location': 'Your Location',
+    'feels_like': '22',
+    'humidity': '65',
+    'wind': '12 km/h',
+    'aqi': '42',
+    'aqi_level': 'Good',
+    'icon': '⛅'
+}
+
+
 @island_plugin(
     name="weather",
     version="1.0.0",
@@ -76,60 +91,61 @@ class WeatherPlugin(PluginBase):
         self._update_thread.start()
 
     def _do_weather_fetch(self):
-        """Actual weather API call."""
-        try:
-            import requests
-            api_key = self.config.get("api_key", "")
-            location = self.config.get("location", "")
-            
-            if not api_key:
-                # Mock data for testing
-                data = {
-                    'temp': '24',
-                    'condition': 'Partly Cloudy',
-                    'location': 'Your Location',
-                    'feels_like': '22',
-                    'humidity': '65',
-                    'wind': '12 km/h',
-                    'aqi': '42',
-                    'aqi_level': 'Good',
-                    'icon': '⛅'
-                }
-            else:
+        """Actual weather API call. No key -> mock (no network, no requests dep)."""
+        api_key = self.config.get("api_key", "")
+        location = self.config.get("location", "")
+
+        if not api_key:
+            data = _MOCK_WEATHER
+        else:
+            try:
+                import requests  # only the keyed path needs the network/dep
                 base_url = "http://api.openweathermap.org/data/2.5/weather"
-                params = {
-                    'q': location or 'auto:ip',
-                    'appid': api_key,
-                    'units': 'metric'
-                }
-                
-                response = requests.get(base_url, params=params, timeout=5)
-                response.raise_for_status()
-                data_json = response.json()
-                
-                weather_id = data_json['weather'][0]['id']
-                icon = self._get_weather_icon(weather_id)
-                
-                # Get AQI
-                aqi_data = self._get_aqi_data(api_key, data_json['coord']['lat'], data_json['coord']['lon'])
-                
-                data = {
-                    'temp': str(int(data_json['main']['temp'])),
-                    'condition': data_json['weather'][0]['main'],
-                    'location': data_json['name'],
-                    'feels_like': str(int(data_json['main']['feels_like'])),
-                    'humidity': str(data_json['main']['humidity']),
-                    'wind': f"{int(data_json['wind']['speed'] * 3.6)} km/h",
-                    'aqi': str(aqi_data['aqi']),
-                    'aqi_level': aqi_data['level'],
-                    'icon': icon
-                }
-            
-            if self._window:
-                QCoreApplication.postEvent(self._window, WeatherEvent(data))
-            
-        except Exception as e:
-            print(f"[weather] Fetch error: {e}")
+                params = {'appid': api_key, 'units': 'metric'}
+                if location:
+                    params['q'] = location
+                else:
+                    # ponytail: no location -> reverse-geocode IP (ip-api, no key) for lat/lon.
+                    # Never send q='auto:ip' (invalid -> 400). On geocode failure, fall back to mock.
+                    try:
+                        geo = requests.get("http://ip-api.com/json", timeout=5).json()
+                        if geo.get('status') == 'fail':
+                            raise RuntimeError('ip-api geocode failed')
+                        params['lat'] = geo['lat']
+                        params['lon'] = geo['lon']
+                    except Exception:
+                        print("[weather] No location and IP geocode failed; using mock data")
+                        data = _MOCK_WEATHER
+
+                if 'q' in params or 'lat' in params:
+                    response = requests.get(base_url, params=params, timeout=5)
+                    response.raise_for_status()
+                    data_json = response.json()
+
+                    weather_id = data_json['weather'][0]['id']
+                    icon = self._get_weather_icon(weather_id)
+
+                    # Get AQI
+                    aqi_data = self._get_aqi_data(api_key, data_json['coord']['lat'], data_json['coord']['lon'])
+
+                    data = {
+                        'temp': str(int(data_json['main']['temp'])),
+                        'condition': data_json['weather'][0]['main'],
+                        'location': data_json['name'],
+                        'feels_like': str(int(data_json['main']['feels_like'])),
+                        'humidity': str(data_json['main']['humidity']),
+                        'wind': f"{int(data_json['wind']['speed'] * 3.6)} km/h",
+                        'aqi': str(aqi_data['aqi']),
+                        'aqi_level': aqi_data['level'],
+                        'icon': icon
+                    }
+            except Exception as e:
+                print(f"[weather] Fetch error: {e}")
+                return
+
+        self._weather_data = data
+        if self._window:
+            QCoreApplication.postEvent(self._window, WeatherEvent(data))
 
     def _get_weather_icon(self, weather_id: int) -> str:
         """Map OpenWeatherMap condition ID to emoji."""

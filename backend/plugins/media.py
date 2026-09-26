@@ -1,10 +1,12 @@
 from typing import Dict, Any, Optional
+import time
 import threading
 import asyncio
 from PySide6.QtCore import QTimer, QCoreApplication
 
 from backend.core.plugin import PluginBase, island_plugin, PluginRegistry
-from backend.core.events import EventBus, MediaSessionChanged, WindowStateChanged
+# EventBus/MediaSessionChanged/WindowStateChanged imports removed: this plugin
+# delivers data via MediaResultEvent postEvent only
 from backend.core.overlay import OverlayWindow, MediaResultEvent
 
 
@@ -328,6 +330,7 @@ class MediaPlugin(PluginBase):
                         return
                     
                     self._media_was_active = True
+                    self._media_session = session
                     # status.value: 4=PLAYING, 5=PAUSED
                     result = (title, artist, app_id, status.value, thumb_bytes, pos_sec, dur_sec, session)
                     QCoreApplication.postEvent(self._window, MediaResultEvent(result))

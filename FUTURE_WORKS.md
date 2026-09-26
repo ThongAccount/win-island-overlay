@@ -66,7 +66,7 @@ Planned features and enhancements for the Dynamic Island overlay.
 ## Technical Improvements
 
 - [ ] **Svelte frontend** — Replace Qt painting with web-based UI
-- [ ] **Plugin system** — Allow third-party extensions
+- [x] **Plugin system** — Third-party extensions (`core/plugin.py`: PluginBase + registry + discovery) — extend discovery to external install paths
 - [ ] **IPC optimization** — Reduce latency for media updates
 - [ ] **Memory optimization** — Reduce idle memory footprint
 - [ ] **Crash recovery** — Auto-restart on unexpected errors

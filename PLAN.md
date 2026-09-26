@@ -4,14 +4,14 @@
 
 | Area           | Status       | Notes                                      |
 |----------------|--------------|--------------------------------------------|
-| Backend        | Functional   | Single-file `overlay.py` (~950 lines)      |
-| OBS integration| Complete     | Detection + notifications + status dot     |
+| Backend        | Functional   | Plugin architecture: `core/overlay.py` (sole paint/anim owner) + `plugins/*` (data sources) |
+| OBS integration| Complete     | Detection + notifications + status dot + swipeable page |
 | Media playback | Complete     | SMTC detection + controls + timeline + viz |
-| Animations     | Complete     | Expand/collapse, fade, notification        |
-| Frontend       | Scaffold     | Empty Svelte project, not wired            |
-| Windows helper | Stale        | `windows.py` not used                      |
-| Media helper   | Stale        | `media.py` not used (logic in overlay.py)  |
-| Config         | Empty        | `config.py` exists but unused              |
+| Animations     | Complete     | Expand/collapse, fade, sideswiper pages, notification |
+| Frontend       | —            | No frontend; pure PySide6 overlay          |
+| Plugin system  | Complete     | `core/plugin.py`: PluginBase + registry + discovery |
+| Activity       | Complete     | Foreground detection → profile switching    |
+| Config         | In use       | `config.py` WINDOW_CONFIG + PLUGIN_CONFIG  |
 
 ---
 

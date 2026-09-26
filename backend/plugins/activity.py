@@ -4,7 +4,7 @@ import ctypes.wintypes
 import threading
 import time
 from dataclasses import dataclass, field
-from PySide6.QtCore import QTimer, QEvent, Qt
+from PySide6.QtCore import QTimer, QEvent, Qt, QCoreApplication, QObject
 from PySide6.QtWidgets import QLabel
 
 from backend.core.plugin import PluginBase, island_plugin, PluginRegistry
@@ -22,6 +22,19 @@ class ForegroundEvent(QEvent):
         self.title = title
         self.class_name = class_name
         self.process_name = process_name
+
+
+class _ForegroundEventHandler(QObject):
+    """Routes ForegroundEvent posted from the worker thread to the GUI thread."""
+    def __init__(self, on_foreground: Callable[[int, str, str, str], None]):
+        super().__init__()
+        self._on_foreground = on_foreground
+
+    def eventFilter(self, obj, event):
+        if event.type() == ForegroundEvent._type:
+            self._on_foreground(event.hwnd, event.title, event.class_name, event.process_name)
+            return True
+        return False
 
 
 @dataclass
@@ -181,7 +194,11 @@ class ActivityPlugin(PluginBase):
             return
 
         self._running = True
-        
+
+        # Route ForegroundEvent posted from worker thread back to GUI-thread callback
+        self._foreground_handler = _ForegroundEventHandler(self._on_foreground)
+        self._window.installEventFilter(self._foreground_handler)
+
         interval = self.config.get("check_interval_ms", 500)
         self._check_timer = QTimer(self._window)
         self._check_timer.timeout.connect(self._check_foreground)
@@ -203,6 +220,8 @@ class ActivityPlugin(PluginBase):
             self._check_thread.join(timeout=1.0)
         if hasattr(self, '_unsub_config'):
             self._unsub_config()
+        if getattr(self, '_foreground_handler', None):
+            self._window.removeEventFilter(self._foreground_handler)
 
     def on_unload(self) -> None:
         pass
@@ -243,6 +262,8 @@ class ActivityPlugin(PluginBase):
             user32 = ctypes.windll.user32
             kernel32 = ctypes.windll.kernel32
             psapi = ctypes.windll.psapi
+            user32.GetForegroundWindow.restype = ctypes.c_void_p
+            kernel32.OpenProcess.restype = ctypes.c_void_p
             
             hwnd = user32.GetForegroundWindow()
             if not hwnd or hwnd == self._current_hwnd:
@@ -255,7 +276,7 @@ class ActivityPlugin(PluginBase):
                         new_title = buff.value
                         if new_title != self._current_title:
                             self._current_title = new_title
-                            QTimer.singleShot(0, lambda: self._on_foreground(hwnd, new_title, self._current_class, self._current_process))
+                            QCoreApplication.postEvent(self._window, ForegroundEvent(hwnd, new_title, self._current_class, self._current_process))
                 return
             
             if hwnd == int(self._window.winId()) if self._window else False:
@@ -267,6 +288,12 @@ class ActivityPlugin(PluginBase):
             if length > 0:
                 buff = ctypes.create_unicode_buffer(length + 1)
                 user32.GetWindowTextW(hwnd, buff, length + 1)
+                title = buff.value
+            # Get window class
+            class_name = ""
+            cls_buff = ctypes.create_unicode_buffer(256)
+            if user32.GetClassNameW(hwnd, cls_buff, 256):
+                class_name = cls_buff.value
             # Get process name
             pid = ctypes.wintypes.DWORD()
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
@@ -285,7 +312,7 @@ class ActivityPlugin(PluginBase):
                         kernel32.CloseHandle(h_process)
             
             # Post to main thread
-            QTimer.singleShot(0, lambda: self._on_foreground(hwnd, title, class_name, process_name))
+            QCoreApplication.postEvent(self._window, ForegroundEvent(hwnd, title, class_name, process_name))
             
         except Exception as e:
             print(f"[activity] Foreground check error: {e}")

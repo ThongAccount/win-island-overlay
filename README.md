@@ -54,8 +54,8 @@ pip install cairosvg  # for OBS icon rendering
 ## Usage
 
 ```powershell
-cd F:\project-iwin-17\dynamic-island\backend
-.\venv\Scripts\python.exe main.py
+cd F:\project-iwin-17\dynamic-island
+.\backend\.venv\Scripts\python.exe -m backend.main
 ```
 
 The overlay appears at the top-center of your primary monitor. Hover near it to expand.
@@ -64,27 +64,32 @@ The overlay appears at the top-center of your primary monitor. Hover near it to 
 
 ```
 backend/
-├── main.py          # Entry point, SIGINT handler
-├── overlay.py       # Main OverlayWindow (QWidget) — all UI, detection, animation
-├── audio_fft.py     # WASAPI loopback FFT audio visualizer
-├── media.py         # winsdk media helper (legacy)
-├── windows.py       # Window detection helper (legacy)
+├── main.py            # Entry point — QApplication, plugin registry, auto-reload watcher
+├── config.py          # WINDOW_CONFIG + PLUGIN_CONFIG (window geometry, plugin options)
+├── core/
+│   ├── overlay.py     # OverlayWindow (QWidget) — sole owner of paint + animations
+│   ├── plugin.py      # PluginBase, @island_plugin decorator, PluginRegistry (lifecycle)
+│   └── events.py      # EventBus + typed events (plugin/overlay signaling)
+├── plugins/
+│   ├── media.py       # SMTC now-playing + album art + FFT visualizer data
+│   ├── obs.py         # OBS Studio process/session detection
+│   ├── notifications.py  # Windows toast listener (UserNotificationListener)
+│   ├── weather.py     # OpenWeatherMap current conditions + AQI
+│   └── activity.py    # Foreground-window detection → context/profile switching
 ├── assets/
-│   └── obs_icon.svg # OBS Studio logo rendered via cairosvg
-├── config.py        # Configuration (empty, for future use)
-└── venv/            # Python virtual environment
+│   └── obs_icon.svg   # OBS Studio logo rendered via cairosvg
+└── __init__.py
 
-test_notif.py        # Test notification sender
-requirements.txt     # Python dependencies
-
-frontend/            # Planned Svelte + Vite UI
-├── package.json     # (empty)
-├── vite.config.js   # (empty)
-└── src/
-    ├── App.svelte   # (empty)
-    ├── island.js    # Svelte component logic
-    └── styles.css   # Glassmorphism styles
+test_pages.py          # Offscreen overlay interaction tests
+test_activity.py       # Offscreen activity plugin (mocked Windows API) test
+test_obs.py            # Offscreen OBS plugin lifecycle test
+requirements.txt       # Python dependencies
 ```
+
+**Plugin model**: plugins are data/event sources. They run background monitors
+(threads / asyncio / timers) and deliver results to the overlay, which owns all
+rendering, geometry, and animation state (`backend/core/overlay.py`). Plugins
+must not own competing island animations.
 
 ### OverlayWindow components
 
@@ -92,16 +97,14 @@ frontend/            # Planned Svelte + Vite UI
 |----------------------------|--------------------------------------------------|
 | Proximity detection        | 100ms QTimer, QCursor.pos(), hot zone            |
 | Hover delay                | 200ms single-shot QTimer                         |
-| Expand/collapse animation  | QVariantAnimation (float 0→1) with custom easing |
+| Expand/collapse animation  | Shared QVariantAnimation (float 0→1) with custom easing |
+| Sideswiper pages           | Hold-drag 250ms / fast drag >12px, 30% threshold flip, wheel |
 | Fullscreen detection       | 500ms Win32 polling + class name exclusions      |
-| OBS detection              | 2000ms process snapshot (CreateToolhelp32)       |
-| OBS recording detection    | `obs-ffmpeg-mux.exe` process check               |
-| Media detection            | Background COM thread with SMTC event callbacks  |
+| OBS state                  | 2000ms process snapshot (CreateToolhelp32) + TCP table |
+| Media detection            | Background asyncio thread with SMTC event callbacks |
 | Audio visualizer           | FFT-based 8-band frequency analysis via WASAPI   |
-| Toast notifications        | UserNotificationListener API with asyncio thread |
-| Position interpolation     | 500ms QTimer, time-based                        |
-| Notification               | 5s auto-dismiss, InQuad+OutBack ease             |
-| Playback controls          | mousePressEvent → thread with COM → winsdk API   |
+| Toast notifications        | UserNotificationListener polling thread → postEvent |
+| Playback controls          | mousePressEvent → winsdk async action           |
 
 ## Key Design Decisions
 

@@ -3,7 +3,7 @@ import threading
 from PySide6.QtCore import QCoreApplication
 
 from backend.core.plugin import PluginBase, island_plugin, PluginRegistry
-from backend.core.events import EventBus, NotificationReceived, WindowStateChanged
+from backend.core.events import NotificationReceived
 from backend.core.overlay import OverlayWindow, ToastNotifEvent
 
 @island_plugin(
@@ -105,6 +105,12 @@ class NotificationsPlugin(PluginBase):
                                         app = n.app_info.display_info.display_name or 'Unknown app'
                                 except:
                                     pass
+
+                                # Per-app filtering (config_schema: enabled_apps/blocked_apps)
+                                enabled = self.config.get("enabled_apps") or []
+                                blocked = self.config.get("blocked_apps") or []
+                                if (enabled and app not in enabled) or (blocked and app in blocked):
+                                    continue
 
                                 binding = n.notification.visual.get_binding("ToastGeneric")
                                 if not binding:

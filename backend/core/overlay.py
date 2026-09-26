@@ -17,7 +17,7 @@ except ImportError:
     WIN32GUI_AVAILABLE = False
 
 from backend.core.plugin import PluginRegistry
-from backend.core.events import EventBus, WindowStateChanged
+from backend.core.events import EventBus
 
 
 SW_SHOWMAXIMIZED = 3
@@ -552,8 +552,6 @@ class OverlayWindow(QWidget):
 
     def _dismiss_notification(self):
         """Collapse OBS notification — main branch behavior."""
-        if self._is_expanded:
-            return
         self._notification_type = 0
         self._hover_pending = False
         self._hover_timer.stop()

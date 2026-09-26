@@ -87,7 +87,10 @@ def main():
     def on_changed(path):
         print(f"[reload] {path} changed, restarting...")
         app.quit()
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        # Re-exec as `-m backend.main`: sys.argv[0] is the script path when run
+        # with -m, so a bare re-exec would lose package context and break the
+        # relative imports in this module. Preserve any extra args.
+        os.execv(sys.executable, [sys.executable, "-m", "backend.main"] + sys.argv[1:])
 
     watcher.fileChanged.connect(on_changed)
     overlay._watcher = watcher
