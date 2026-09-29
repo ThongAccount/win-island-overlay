@@ -5,6 +5,7 @@ from PySide6.QtCore import QCoreApplication
 from backend.core.plugin import PluginBase, island_plugin, PluginRegistry
 from backend.core.events import NotificationReceived
 from backend.core.overlay import OverlayWindow, ToastNotifEvent
+from backend.core.async_winrt import winrt_wait
 
 @island_plugin(
     name="notifications",
@@ -74,7 +75,7 @@ class NotificationsPlugin(PluginBase):
 
                 # UserNotificationListener is not activatable — static Current only
                 listener = UserNotificationListener.current
-                access = await asyncio.wait_for(listener.request_access_async(), timeout=5.0)
+                access = await winrt_wait(listener.request_access_async(), 5.0)
                 if access != UserNotificationListenerAccessStatus.ALLOWED:
                     print(f"[notifications] Access denied: {access}")
                     return
@@ -82,17 +83,17 @@ class NotificationsPlugin(PluginBase):
                 seen_ids = set()
 
                 # Pre-populate with existing notifications to skip them
-                existing = await asyncio.wait_for(listener.get_notifications_async(NotificationKinds.TOAST), timeout=3.0)
-                for n in list(existing):
+                existing = await winrt_wait(listener.get_notifications_async(NotificationKinds.TOAST), 3.0)
+                for n in list(existing or []):
                     seen_ids.add(n.id)
 
                 print(f"[notifications] Listener started, skipping {len(seen_ids)} existing notifications")
 
                 while self._running:
                     try:
-                        notifs = await asyncio.wait_for(listener.get_notifications_async(NotificationKinds.TOAST), timeout=2.0)
+                        notifs = await winrt_wait(listener.get_notifications_async(NotificationKinds.TOAST), 2.0)
                         current_ids = set()
-                        for n in list(notifs):
+                        for n in list(notifs or []):
                             nid = n.id
                             current_ids.add(nid)
                             if nid in seen_ids:

@@ -8,6 +8,7 @@ from backend.core.plugin import PluginBase, island_plugin, PluginRegistry
 # EventBus/MediaSessionChanged/WindowStateChanged imports removed: this plugin
 # delivers data via MediaResultEvent postEvent only
 from backend.core.overlay import OverlayWindow, MediaResultEvent
+from backend.core.async_winrt import winrt_wait
 
 
 # Audio FFT capture (from main branch - WASAPI loopback with frequency band mapping)
@@ -248,12 +249,16 @@ class MediaPlugin(PluginBase):
         """Read thumbnail from Windows Storage streams."""
         from winsdk.windows.storage.streams import DataReader
         try:
-            stream = await asyncio.wait_for(thumbnail_ref.open_read_async(), timeout=3.0)
+            # winrt_wait: never cancel the WinRT op (cancelling -> InvalidStateError)
+            stream = await winrt_wait(thumbnail_ref.open_read_async(), 3.0)
+            if stream is None:
+                return None
             size = int(stream.size)
             if size <= 0 or size > 5_000_000:
                 return None
             reader = DataReader(stream)
-            await reader.load_async(size)
+            if await winrt_wait(reader.load_async(size), 3.0) is None:
+                return None
             buf = bytearray(size)
             reader.read_bytes(buf)
             return bytes(buf)
